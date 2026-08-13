@@ -1,5 +1,10 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""Agent for controlling FTDI data-bus GPIOs via bit-bang mode."""
+"""Agent for controlling FTDI data-bus GPIOs via bit-bang mode.
+
+Each of the D0-D7 data-bus lines can be used independently as an input or an
+output. A line becomes an output the first time it is driven with ``set``;
+lines that are only read with ``get`` stay configured as inputs.
+"""
 
 import threading
 
@@ -20,12 +25,19 @@ SUPPORTED_DEVICES = {
     0x6014: 1,  # FT232HL/Q
 }
 
+# Per-device output direction masks, keyed by (busnum, devnum, interface). A set
+# bit marks the corresponding line as an output; the state persists across the
+# short-lived device objects so pins keep their input/output role between calls.
+_directions = {}
+_directions_lock = threading.Lock()
+
 
 class FTDIGPIO:
     def __init__(self, vendor_id, model_id, busnum, devnum, interface):
         self._validate_device(vendor_id, model_id, interface)
         self._interface = interface - 1
         self._index = interface
+        self._key = (busnum, devnum, interface)
         self._lock = threading.Lock()
 
         self._dev = self._find_device(vendor_id, model_id, busnum, devnum)
@@ -96,23 +108,33 @@ class FTDIGPIO:
             raise TimeoutError("FTDI GPIO read returned no data")
         return data[0]
 
+    def _direction(self):
+        with _directions_lock:
+            return _directions.get(self._key, 0x00)
+
+    def _store_direction(self, mask):
+        with _directions_lock:
+            _directions[self._key] = mask
+
     def get(self, index):
         self._validate_index(index)
         with self._lock:
             value = self._read_gpio_byte()
-        return bool(value & (1 << (index % 8)))
+        return bool(value & (1 << index))
 
     def set(self, index, status):
         self._validate_index(index)
         mask = 1 << index
         with self._lock:
+            direction = self._direction() | mask
             output = self._read_gpio_byte()
             if status:
                 output |= mask
             else:
                 output &= ~mask
-            self._set_bitmode(GPIO_MASK, BITMODE_ASYNC_BITBANG)
+            self._set_bitmode(direction, BITMODE_ASYNC_BITBANG)
             self._write([output])
+            self._store_direction(direction)
 
 
 def _run_with_device(vendor_id, model_id, busnum, devnum, interface, callback):

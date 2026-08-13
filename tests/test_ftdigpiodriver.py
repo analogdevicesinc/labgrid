@@ -157,6 +157,8 @@ def test_ftdigpio_driver_release_ignores_unknown_agent():
 def test_ftdigpio_agent(monkeypatch):
     from labgrid.util.agents import ftdigpio
 
+    ftdigpio._directions.clear()
+
     class FakeEndpoint:
         def __init__(self, address):
             self.bEndpointAddress = address
@@ -217,7 +219,7 @@ def test_ftdigpio_agent(monkeypatch):
     assert device.control[-1] == (
         ftdigpio.OUT_REQTYPE,
         ftdigpio.SIO_SET_BITMODE,
-        0x01ff,
+        0x0104,
         1,
         None,
     )
@@ -228,7 +230,7 @@ def test_ftdigpio_agent(monkeypatch):
     assert device.control[-1] == (
         ftdigpio.OUT_REQTYPE,
         ftdigpio.SIO_SET_BITMODE,
-        0x01ff,
+        0x010c,
         1,
         None,
     )
@@ -295,7 +297,8 @@ def test_ftdigpio_agent_configures_device_after_usb_error(monkeypatch):
     from labgrid.util.agents import ftdigpio
 
     class FakeEndpoint:
-        bEndpointAddress = 0x02
+        def __init__(self, address):
+            self.bEndpointAddress = address
 
         def write(self, data, timeout=None):
             pass
@@ -303,7 +306,7 @@ def test_ftdigpio_agent_configures_device_after_usb_error(monkeypatch):
     class FakeConfig:
         def __getitem__(self, item):
             assert item == (0, 0)
-            return [FakeEndpoint()]
+            return [FakeEndpoint(0x02), FakeEndpoint(0x81)]
 
     class FakeDevice:
         bus = 1
