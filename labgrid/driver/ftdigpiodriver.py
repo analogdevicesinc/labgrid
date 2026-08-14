@@ -64,6 +64,14 @@ class FTDIGPIODriver(Driver, DigitalOutputProtocol):
         if self.networkservice and self.networkservice.address == self._host:
             self._host = f"{self.networkservice.username}@{self._host}"
         self._proxy = _acquire_agent(self._host, self.gpio.busnum, self.gpio.devnum, self.gpio.interface)
+        # Establish the input baseline for this interface before any read/write.
+        self._proxy.setup(
+            self.gpio.vendor_id,
+            self.gpio.model_id,
+            self.gpio.busnum,
+            self.gpio.devnum,
+            self.gpio.interface,
+        )
 
     def on_deactivate(self):
         self._proxy = None
