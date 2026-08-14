@@ -1,5 +1,11 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""Agent for controlling FTDI data-bus GPIOs via bit-bang mode."""
+"""Agent for controlling FTDI data-bus GPIOs via bit-bang mode.
+
+Each of the D0-D7 data-bus lines can be used independently as an input or an
+output. When the driver starts up the interface is explicitly switched into
+async bit-bang mode with every line configured as an input; a line only becomes
+an output when it is driven with ``set``.
+"""
 
 import threading
 
@@ -20,12 +26,19 @@ SUPPORTED_DEVICES = {
     0x6014: 1,  # FT232HL/Q
 }
 
+# Per-device output direction masks, keyed by (busnum, devnum, interface). A set
+# bit marks the corresponding line as an output; the state persists across the
+# short-lived device objects so pins keep their input/output role between calls.
+_directions = {}
+_directions_lock = threading.Lock()
+
 
 class FTDIGPIO:
     def __init__(self, vendor_id, model_id, busnum, devnum, interface):
         self._validate_device(vendor_id, model_id, interface)
         self._interface = interface - 1
         self._index = interface
+        self._key = (busnum, devnum, interface)
         self._lock = threading.Lock()
 
         self._dev = self._find_device(vendor_id, model_id, busnum, devnum)
@@ -96,22 +109,40 @@ class FTDIGPIO:
             raise TimeoutError("FTDI GPIO read returned no data")
         return data[0]
 
+    def _direction(self):
+        with _directions_lock:
+            return _directions.get(self._key, 0x00)
+
+    def _apply_direction(self, direction):
+        # Program async bit-bang mode explicitly: 1 = output, 0 = input.
+        self._set_bitmode(direction, BITMODE_ASYNC_BITBANG)
+        with _directions_lock:
+            _directions[self._key] = direction
+
+    def setup(self):
+        # Establish the input baseline at driver startup: enter async bit-bang
+        # mode with the known direction (all lines are inputs on first use).
+        with self._lock:
+            self._apply_direction(self._direction())
+
     def get(self, index):
         self._validate_index(index)
         with self._lock:
             value = self._read_gpio_byte()
-        return bool(value & (1 << (index % 8)))
+        return bool(value & (1 << index))
 
     def set(self, index, status):
         self._validate_index(index)
         mask = 1 << index
         with self._lock:
+            # Only the requested line becomes an output; the others stay inputs.
+            direction = self._direction() | mask
             output = self._read_gpio_byte()
             if status:
                 output |= mask
             else:
                 output &= ~mask
-            self._set_bitmode(GPIO_MASK, BITMODE_ASYNC_BITBANG)
+            self._apply_direction(direction)
             self._write([output])
 
 
@@ -138,6 +169,14 @@ def handle_set(vendor_id, model_id, busnum, devnum, interface, index, status):
     return True
 
 
+def handle_setup(vendor_id, model_id, busnum, devnum, interface):
+    _run_with_device(
+        vendor_id, model_id, busnum, devnum, interface,
+        lambda device: device.setup(),
+    )
+    return True
+
+
 def handle_close():
     return True
 
@@ -145,5 +184,6 @@ def handle_close():
 methods = {
     "get": handle_get,
     "set": handle_set,
+    "setup": handle_setup,
     "close": handle_close,
 }

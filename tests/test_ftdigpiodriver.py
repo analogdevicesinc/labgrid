@@ -108,6 +108,7 @@ def test_ftdigpio_driver_set_get(target, monkeypatch):
 
     proxy.set = proxy_set
     proxy.get = proxy_get
+    proxy.setup = lambda *args, **kwargs: None
     proxy.close = lambda: None
 
     class FakeWrapper:
@@ -156,6 +157,8 @@ def test_ftdigpio_driver_release_ignores_unknown_agent():
 
 def test_ftdigpio_agent(monkeypatch):
     from labgrid.util.agents import ftdigpio
+
+    ftdigpio._directions.clear()
 
     class FakeEndpoint:
         def __init__(self, address):
@@ -217,7 +220,7 @@ def test_ftdigpio_agent(monkeypatch):
     assert device.control[-1] == (
         ftdigpio.OUT_REQTYPE,
         ftdigpio.SIO_SET_BITMODE,
-        0x01ff,
+        0x0104,
         1,
         None,
     )
@@ -228,7 +231,7 @@ def test_ftdigpio_agent(monkeypatch):
     assert device.control[-1] == (
         ftdigpio.OUT_REQTYPE,
         ftdigpio.SIO_SET_BITMODE,
-        0x01ff,
+        0x010c,
         1,
         None,
     )
@@ -243,6 +246,69 @@ def test_ftdigpio_agent(monkeypatch):
     assert ftdigpio.handle_get(0x0403, 0x6014, 1, 39, 1, 2) is False
     assert device.released == [0, 0, 0, 0, 0]
     assert ftdigpio.handle_close() is True
+
+
+def test_ftdigpio_agent_setup_configures_inputs(monkeypatch):
+    from labgrid.util.agents import ftdigpio
+
+    ftdigpio._directions.clear()
+
+    class FakeEndpoint:
+        def __init__(self, address):
+            self.bEndpointAddress = address
+
+        def write(self, data, timeout=None):
+            pass
+
+    class FakeConfig:
+        def __getitem__(self, item):
+            assert item == (0, 0)
+            return [FakeEndpoint(0x02)]
+
+    class FakeDevice:
+        bus = 1
+        address = 39
+
+        def __init__(self):
+            self.control = []
+            self.pins = b"\x02"
+
+        def set_configuration(self):
+            pass
+
+        def is_kernel_driver_active(self, interface):
+            return False
+
+        def get_active_configuration(self):
+            return FakeConfig()
+
+        def ctrl_transfer(self, request_type, request, value, index, data, timeout=None):
+            self.control.append((request_type, request, value, index, data))
+            if request_type == ftdigpio.IN_REQTYPE and request == ftdigpio.SIO_READ_PINS:
+                return self.pins
+            return None
+
+    device = FakeDevice()
+    monkeypatch.setattr(ftdigpio.usb.core, "find", lambda **kwargs: [device])
+    monkeypatch.setattr(ftdigpio.usb.util, "claim_interface", lambda dev, interface: None)
+    monkeypatch.setattr(ftdigpio.usb.util, "release_interface", lambda dev, interface: None)
+    monkeypatch.setattr(ftdigpio.usb.util, "dispose_resources", lambda dev: None)
+
+    # Startup must explicitly enter async bit-bang mode with all lines as inputs
+    # (direction mask 0x00).
+    assert ftdigpio.handle_setup(0x0403, 0x6014, 1, 39, 1) is True
+    assert (
+        ftdigpio.OUT_REQTYPE,
+        ftdigpio.SIO_SET_BITMODE,
+        0x0100,
+        1,
+        None,
+    ) in device.control
+
+    # A plain read must not reconfigure the bit-mode.
+    device.control.clear()
+    assert ftdigpio.handle_get(0x0403, 0x6014, 1, 39, 1, 1) is True
+    assert all(entry[1] != ftdigpio.SIO_SET_BITMODE for entry in device.control)
 
 
 def test_ftdigpio_agent_rejects_empty_pin_read(monkeypatch):
@@ -295,7 +361,8 @@ def test_ftdigpio_agent_configures_device_after_usb_error(monkeypatch):
     from labgrid.util.agents import ftdigpio
 
     class FakeEndpoint:
-        bEndpointAddress = 0x02
+        def __init__(self, address):
+            self.bEndpointAddress = address
 
         def write(self, data, timeout=None):
             pass
@@ -303,7 +370,7 @@ def test_ftdigpio_agent_configures_device_after_usb_error(monkeypatch):
     class FakeConfig:
         def __getitem__(self, item):
             assert item == (0, 0)
-            return [FakeEndpoint()]
+            return [FakeEndpoint(0x02), FakeEndpoint(0x81)]
 
     class FakeDevice:
         bus = 1

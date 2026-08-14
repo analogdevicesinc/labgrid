@@ -2662,7 +2662,10 @@ Arguments:
 FTDIGPIODriver
 ~~~~~~~~~~~~~~
 The :any:`FTDIGPIODriver` controls one `FTDIGPIO`_ or `NetworkFTDIGPIO`_ line
-via FTDI bit-bang GPIO output mode.
+via FTDI bit-bang GPIO mode. Any of the ``D0``-``D7`` data-bus lines can be used
+as an input or an output. When the driver is activated the interface is
+explicitly switched into async bit-bang mode with every line configured as an
+input; a line only becomes an output when it is driven with ``set``.
 
 The FTDI serial kernel driver must not be bound to the same interface.
 
