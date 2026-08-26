@@ -198,7 +198,21 @@ class Config:
             KeyError: if the requested key can not be found in the
                 configuration, or if the target can not be found in the
                 configuration.
+
+        .. deprecated::
+            Use :meth:`labgrid.target.Target.get_option` instead, which also
+            considers options supplied by a ``RemotePlace``'s coordinator-side
+            config. This method only sees local configuration.
         """
+        warnings.warn(
+            "Config.get_target_option() is deprecated, use Target.get_option() instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self._get_target_option(target, name, default)
+
+    def _get_target_option(self, target, name, default=None):
+        # internal, non-deprecated accessor used by Target.get_option()
         if target not in self.data['targets']:
             raise KeyError(f"No target '{target}' found in configuration")
 
