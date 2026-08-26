@@ -97,6 +97,122 @@ def test_get_ssh_no_username(target, mocker):
     session._get_driver_or_new.assert_called_once_with(target, "SSHDriver", name=None)
     assert result is driver
 
+
+def test_get_target_config_includes_place_config():
+    from labgrid.remote.client import ClientSession
+    from labgrid.remote.common import Place
+
+    session = object.__new__(ClientSession)
+    session.get_target_resources = lambda place: {}
+    place = Place(
+        name="test-place",
+        config=(
+            "resources:\n"
+            "- NetworkService: {address: board.example.com}\n"
+            "drivers:\n"
+            "- SSHDriver: {}\n"
+            "options:\n"
+            "  board: example-board\n"
+        ),
+    )
+
+    assert session.get_target_config(place) == {
+        "resources": [{"NetworkService": {"address": "board.example.com"}}],
+        "drivers": [{"SSHDriver": {}}],
+        "options": {"board": "example-board"},
+    }
+
+
+def test_get_target_config_normalizes_named_place_config():
+    from types import SimpleNamespace
+
+    from labgrid.remote.client import ClientSession
+    from labgrid.remote.common import Place
+
+    session = object.__new__(ClientSession)
+    session.get_target_resources = lambda place: {
+        ("matched", "NetworkService"): SimpleNamespace(
+            cls="NetworkService", args={"address": "matched.example.com"}
+        )
+    }
+    place = Place(
+        name="test-place",
+        config=(
+            "resources:\n"
+            "  NetworkService:\n"
+            "    address: central.example.com\n"
+            "drivers:\n"
+            "  SSHDriver: {}\n"
+        ),
+    )
+
+    config = session.get_target_config(place)
+
+    assert config["resources"] == [
+        {"NetworkService": {"address": "central.example.com"}},
+        {"NetworkService": {"name": "matched", "address": "matched.example.com"}},
+    ]
+    assert config["drivers"] == [{"SSHDriver": {}}]
+
+
+def test_validate_place_config_valid():
+    from labgrid.remote.client import ClientSession
+
+    # valid config with known classes does not raise
+    ClientSession._validate_place_config(
+        "resources:\n- NetworkService: {address: h}\ndrivers:\n- SSHDriver: {}\n"
+    )
+    # empty config is valid
+    ClientSession._validate_place_config("")
+
+
+def test_validate_place_config_unknown_class():
+    from labgrid.remote.client import ClientSession
+    from labgrid.exceptions import InvalidConfigError
+
+    with pytest.raises(InvalidConfigError, match="unknown resource class"):
+        ClientSession._validate_place_config("resources:\n- NoSuchResource: {}\n")
+
+
+def test_validate_place_config_wrong_root_type():
+    from labgrid.remote.client import ClientSession
+    from labgrid.exceptions import InvalidConfigError
+
+    with pytest.raises(InvalidConfigError, match="mapping"):
+        ClientSession._validate_place_config("- a\n- b\n")
+
+
+def test_edit_place_config_save_fails_prompts_without_crash(monkeypatch):
+    """Regression: a coordinator save error must prompt, not raise UnboundLocalError."""
+    import asyncio
+    import grpc
+    from labgrid.remote.client import ClientSession
+
+    session = object.__new__(ClientSession)
+    session.args = type("Args", (), {"debug": False})()
+
+    place = type("Place", (), {"name": "test", "changed": 1.0, "config": ""})()
+    session.get_idle_place = lambda: place
+    monkeypatch.setattr(
+        session,
+        "_open_in_editor",
+        lambda text: "resources:\n- NetworkService: {address: h}\n",
+    )
+
+    rpc_error = grpc.aio.AioRpcError(
+        grpc.StatusCode.FAILED_PRECONDITION, None, None, details="changed elsewhere"
+    )
+
+    async def fake_save(*args, **kwargs):
+        raise rpc_error
+
+    session._save_place_config = fake_save
+    # user answers "no" to reopen -> clean return, no UnboundLocalError
+    monkeypatch.setattr("builtins.input", lambda *a, **k: "n")
+
+    asyncio.run(session.edit_place_config())
+
+
 def test_place_show(place):
     with pexpect.spawn('python -m labgrid.remote.client -p test show') as spawn:
         spawn.expect("Place 'test':")
@@ -127,6 +243,29 @@ def test_place_comment(place):
         spawn.expect(pexpect.EOF)
         spawn.close()
         assert spawn.exitstatus == 0, spawn.before.strip()
+
+def test_place_config_edit(place, tmp_path):
+    # use a fake EDITOR that writes a fixed config into the file it is given
+    config = "resources:\n- NetworkService: {address: board.example.com}\ndrivers:\n- SSHDriver: {}\n"
+    editor = tmp_path / "fake-editor.sh"
+    editor.write_text(f"#!/bin/sh\ncat > \"$1\" <<'EOF'\n{config}EOF\n")
+    editor.chmod(0o755)
+
+    env = {**os.environ, "EDITOR": str(editor)}
+    with pexpect.spawn('python -m labgrid.remote.client -p test edit', env=env) as spawn:
+        spawn.expect(pexpect.EOF)
+        spawn.close()
+        assert spawn.exitstatus == 0, spawn.before.strip()
+
+    # config shows up in 'show' and round-trips through the coordinator
+    with pexpect.spawn('python -m labgrid.remote.client -p test show') as spawn:
+        spawn.expect("Place 'test':")
+        spawn.expect("config:")
+        spawn.expect("board.example.com")
+        spawn.expect(pexpect.EOF)
+        spawn.close()
+        assert spawn.exitstatus == 0, spawn.before.strip()
+
 
 def test_place_match(place):
     with pexpect.spawn('python -m labgrid.remote.client -p test add-match "e1/g1/r1" "e2/g2/*"') as spawn:
