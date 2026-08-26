@@ -2,8 +2,59 @@ import copy
 import os
 import attr
 
+from ..exceptions import InvalidConfigError
 from ..factory import target_factory
 from .common import NetworkResource, ManagedResource, ResourceManager
+
+
+def _normalize_ignore(entries, kind):
+    """Normalize an ``ignore_resources``/``ignore_drivers`` list into selectors.
+
+    Each entry may be either a class name string or a mapping with a required
+    ``cls`` key and an optional ``name`` key. Returns a list of
+    ``(cls, name_or_None)`` tuples.
+
+    Args:
+        entries: the raw ``ignore_*`` value from the local ``RemotePlace``
+        kind (str): "resource" or "driver", used in error messages
+
+    Raises:
+        InvalidConfigError: if an entry has an unexpected type or unknown keys
+    """
+    selectors = []
+    for entry in entries:
+        if isinstance(entry, str):
+            selectors.append((entry, None))
+        elif isinstance(entry, dict):
+            unknown = set(entry) - {"cls", "name"}
+            if unknown:
+                raise InvalidConfigError(
+                    f"invalid ignore_{kind}s selector {dict(entry)}: unknown keys {sorted(unknown)}"
+                )
+            if "cls" not in entry:
+                raise InvalidConfigError(
+                    f"invalid ignore_{kind}s selector {dict(entry)}: missing 'cls' key"
+                )
+            selectors.append((entry["cls"], entry.get("name")))
+        else:
+            raise InvalidConfigError(
+                f"invalid ignore_{kind}s selector {entry!r}: must be a class name or a mapping"
+            )
+    return selectors
+
+
+def _is_ignored(cls, name, selectors):
+    """Return True if the (cls, name) pair matches any selector.
+
+    A selector without a name matches every instance of the class; a selector
+    with a name matches only that specific named instance.
+    """
+    for sel_cls, sel_name in selectors:
+        if sel_cls != cls:
+            continue
+        if sel_name is None or sel_name == name:
+            return True
+    return False
 
 
 @attr.s(eq=False)
@@ -84,13 +135,63 @@ class RemotePlaceManager(ResourceManager):
             expanded.append(new)
         self.logger.debug("expanded remote resources for place %s: %s", remote_place.name, expanded)
 
-        # handle remote env
-        remote_env = place.get_remote_env()
-        target_factory.make_resources_from_config(remote_place.target, remote_env.get("resources", {}))
-        target_factory.make_drivers_from_config(remote_place.target, remote_env.get("drivers", {}))
+        # augment the target with the place config served by the coordinator
+        self._apply_place_config(remote_place, place)
 
         remote_place.avail = True
         remote_place.tags = copy.deepcopy(place.tags)
+
+    def _apply_place_config(self, remote_place, place):
+        """Instantiate resources and drivers from the coordinator-side place config.
+
+        The config is centrally managed and effectively untrusted network input,
+        so it is validated before use. Nested ``RemotePlace`` resources are always
+        dropped to avoid recursion. Local ``ignore_resources``/``ignore_drivers``
+        selectors on the ``RemotePlace`` suppress unwanted config entries so that
+        explicit local configuration can win deterministically.
+        """
+        config = place.get_config()
+        if not config:
+            return
+
+        # fail early and clearly on unknown classes / bad structure
+        target_factory.validate_config(config)
+
+        ignore_resources = _normalize_ignore(remote_place.ignore_resources, "resource")
+        ignore_drivers = _normalize_ignore(remote_place.ignore_drivers, "driver")
+
+        resources = []
+        for item in target_factory._convert_to_named_list(config.get("resources", {})):
+            cls, name = item["cls"], item["name"]
+            if cls == "RemotePlace":
+                # never recurse into another RemotePlace from a place config
+                self.logger.debug("ignoring nested RemotePlace in config of place %s", place.name)
+                continue
+            if _is_ignored(cls, name, ignore_resources):
+                self.logger.debug("ignoring config resource %s (name=%s) for place %s", cls, name, place.name)
+                continue
+            resources.append(item)
+
+        drivers = []
+        for item in target_factory._convert_to_named_list(config.get("drivers", {})):
+            cls, name = item["cls"], item["name"]
+            if _is_ignored(cls, name, ignore_drivers):
+                self.logger.debug("ignoring config driver %s (name=%s) for place %s", cls, name, place.name)
+                continue
+            drivers.append(item)
+
+        target_factory.make_resources_from_config(remote_place.target, resources)
+        target_factory.make_drivers_from_config(remote_place.target, drivers)
+
+        # expose target-level options for Target.get_option(); features are
+        # intentionally not supported here (tags are available via RemotePlace)
+        options = config.get("options", {})
+        if not isinstance(options, dict):
+            raise InvalidConfigError(
+                f"'options' in config of place {place.name} must be a mapping, "
+                f"got {type(options).__name__}"
+            )
+        remote_place.config_options = dict(options)
 
     def poll(self):
         import asyncio
@@ -124,9 +225,27 @@ class RemotePlaceManager(ResourceManager):
 class RemotePlace(ManagedResource):
     manager_cls = RemotePlaceManager
 
+    #: Suppress resources supplied by the coordinator-side place config. Each
+    #: entry is either a class name (matching all instances of that class) or a
+    #: mapping ``{cls: <class>, name: <name>}`` (matching a single named
+    #: instance).
+    ignore_resources = attr.ib(
+        default=attr.Factory(list),
+        validator=attr.validators.instance_of(list),
+    )
+    #: Suppress drivers supplied by the coordinator-side place config, using the
+    #: same selector syntax as :attr:`ignore_resources`.
+    ignore_drivers = attr.ib(
+        default=attr.Factory(list),
+        validator=attr.validators.instance_of(list),
+    )
+
     def __attrs_post_init__(self):
         self.timeout = 10.0
         self.tags = {}
+        # target-level options supplied by the coordinator-side place config,
+        # populated by RemotePlaceManager once the place is expanded
+        self.config_options = {}
         super().__attrs_post_init__()
 
 @attr.s(eq=False)
