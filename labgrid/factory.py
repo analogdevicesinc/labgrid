@@ -2,7 +2,6 @@ import inspect
 
 from .exceptions import InvalidConfigError, RegistrationError
 from .util.dict import filter_dict
-from .binding import BindingError
 
 
 class TargetFactory:
@@ -163,13 +162,37 @@ class TargetFactory:
             name = item.pop('name', None)
             bindings = item.pop('bindings', {})
             args = item # remaining args
-            if target is not None:
-                target.set_binding_map(bindings)
-            try:
-                self.make_driver(target, driver, name, args)
-            except BindingError:
-                if target is not None:
-                    raise
+            target.set_binding_map(bindings)
+            self.make_driver(target, driver, name, args)
+
+    def validate_config(self, config):
+        """Structurally validate a resource/driver config without instantiating.
+
+        This checks that the ``resources`` and ``drivers`` sections have a valid
+        structure (via :meth:`_convert_to_named_list`) and that all referenced
+        classes are registered. It deliberately does *not* instantiate anything,
+        so it has no side effects (no ResourceManager registration, no
+        coordinator access) and is safe to run on untrusted input.
+
+        Args:
+            config (dict): parsed config with optional ``resources`` and
+                ``drivers`` keys
+
+        Raises:
+            InvalidConfigError: if the structure is invalid or a class is unknown
+        """
+        if not isinstance(config, dict):
+            raise InvalidConfigError(f"config must be a mapping, got {type(config).__name__}")
+
+        for item in TargetFactory._convert_to_named_list(config.get('resources', {})):
+            cls = item['cls']
+            if cls not in self.resources:
+                raise InvalidConfigError(f"unknown resource class '{cls}'")
+
+        for item in TargetFactory._convert_to_named_list(config.get('drivers', {})):
+            cls = item['cls']
+            if cls not in self.drivers:
+                raise InvalidConfigError(f"unknown driver class '{cls}'")
 
     def class_from_string(self, string: str):
         try:
