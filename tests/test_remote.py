@@ -302,7 +302,11 @@ def _capture_remote_place_credentials(monkeypatch, tmpdir, *, options=None, tls_
         loop = None
 
         def get_place(self, name):
-            return argparse.Namespace(tags={}, acquired_resources=[])
+            return argparse.Namespace(
+                tags={},
+                acquired_resources=[],
+                get_config=lambda: {},
+            )
 
         def get_target_resources(self, place):
             return {}
