@@ -166,6 +166,52 @@ allocated before returning.
 A reservation will time out after a short time, if it is neither refreshed nor
 used by locked places.
 
+Coordinator-side place config
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The coordinator can store a per-place YAML config that augments the target
+built from a :any:`RemotePlace` with extra resources, drivers and target
+options. This keeps a central board description next to the coordinator, so
+client environments only need to reference the place by name instead of
+duplicating the full resource and driver list on every CI runner and developer
+machine. See :ref:`remote-place-config` in the configuration reference
+for the config format, precedence rules and security considerations.
+
+Edit a place's config in ``$EDITOR`` (the place must be idle):
+
+.. code-block:: bash
+
+  $ labgrid-client -p board-1 edit
+
+The editor opens with the current config; on save the config is validated
+locally before being sent to the coordinator. For example, a central config
+exposing an SSH-reachable board and a target option::
+
+  resources:
+  - NetworkService:
+      address: 'board-1.lab.example.com'
+      username: 'root'
+  drivers:
+  - SSHDriver: {}
+  options:
+    board: 'example-board'
+
+A client then only needs a minimal environment file:
+
+.. code-block:: yaml
+
+   targets:
+     main:
+       resources:
+         RemotePlace:
+           name: 'board-1'
+
+The stored config is shown alongside the other place metadata:
+
+.. code-block:: bash
+
+  $ labgrid-client -p board-1 show
+
 Library
 -------
 labgrid can be used directly as a Python library, without the infrastructure
