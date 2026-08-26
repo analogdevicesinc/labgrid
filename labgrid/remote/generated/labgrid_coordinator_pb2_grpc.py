@@ -149,6 +149,11 @@ class CoordinatorStub(object):
                 request_serializer=labgrid__coordinator__pb2.ListReservationsRequest.SerializeToString,
                 response_deserializer=labgrid__coordinator__pb2.ListReservationsResponse.FromString,
                 )
+        self.SetPlaceConfig = channel.unary_unary(
+                '/labgrid.Coordinator/SetPlaceConfig',
+                request_serializer=labgrid__coordinator__pb2.SetPlaceConfigRequest.SerializeToString,
+                response_deserializer=labgrid__coordinator__pb2.SetPlaceConfigResponse.FromString,
+                )
         self.SetPlaceRemoteEnv = channel.unary_unary(
                 '/labgrid.Coordinator/SetPlaceRemoteEnv',
                 request_serializer=labgrid__coordinator__pb2.SetPlaceRemoteEnvRequest.SerializeToString,
@@ -321,8 +326,15 @@ class CoordinatorServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def SetPlaceRemoteEnv(self, request, context):
+    def SetPlaceConfig(self, request, context):
         """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def SetPlaceRemoteEnv(self, request, context):
+        """Deprecated compatibility alias for clients using the old remote_env name.
+        """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
@@ -464,6 +476,11 @@ def add_CoordinatorServicer_to_server(servicer, server):
                     servicer.ListReservations,
                     request_deserializer=labgrid__coordinator__pb2.ListReservationsRequest.FromString,
                     response_serializer=labgrid__coordinator__pb2.ListReservationsResponse.SerializeToString,
+            ),
+            'SetPlaceConfig': grpc.unary_unary_rpc_method_handler(
+                    servicer.SetPlaceConfig,
+                    request_deserializer=labgrid__coordinator__pb2.SetPlaceConfigRequest.FromString,
+                    response_serializer=labgrid__coordinator__pb2.SetPlaceConfigResponse.SerializeToString,
             ),
             'SetPlaceRemoteEnv': grpc.unary_unary_rpc_method_handler(
                     servicer.SetPlaceRemoteEnv,
@@ -936,6 +953,23 @@ class Coordinator(object):
         return grpc.experimental.unary_unary(request, target, '/labgrid.Coordinator/ListReservations',
             labgrid__coordinator__pb2.ListReservationsRequest.SerializeToString,
             labgrid__coordinator__pb2.ListReservationsResponse.FromString,
+            options, channel_credentials,
+            insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
+
+    @staticmethod
+    def SetPlaceConfig(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(request, target, '/labgrid.Coordinator/SetPlaceConfig',
+            labgrid__coordinator__pb2.SetPlaceConfigRequest.SerializeToString,
+            labgrid__coordinator__pb2.SetPlaceConfigResponse.FromString,
             options, channel_credentials,
             insecure, call_credentials, compression, wait_for_ready, timeout, metadata)
 
