@@ -234,6 +234,67 @@ class Target:
         """
         return self._get_driver(cls, name=name, resource=resource, activate=activate)
 
+    def get_option(self, name, default=None):
+        """Retrieve a target option, merging local and remote configuration.
+
+        Options defined locally (in the environment config under this target's
+        ``options`` key) take precedence over options supplied by a
+        ``RemotePlace``'s coordinator-side config. This makes local configuration
+        deterministically win over centrally managed defaults.
+
+        If the environment config declares a ``RemotePlace`` for this target but
+        it has not been instantiated yet (so its remote options are unknown), a
+        ``KeyError`` is raised instead of silently returning a local-only or
+        default value.
+
+        Args:
+            name (str): name of the option
+            default (any): value to return if the option is not found; if None
+                (the default), a missing option raises KeyError
+
+        Returns:
+            any: the option value, or ``default`` if not found
+
+        Raises:
+            KeyError: if the option is not found and no usable default was given,
+                or if a declared RemotePlace has not been instantiated
+        """
+        # local target options win over remote ones
+        if self.env is not None:
+            try:
+                return self.env.config._get_target_option(self.name, name)
+            except KeyError:
+                pass
+
+        # collect remote options from instantiated RemotePlace resources
+        from .resource.remote import RemotePlace
+
+        remote_places = [r for r in self.resources if isinstance(r, RemotePlace)]
+        if remote_places:
+            for remote_place in remote_places:
+                options = getattr(remote_place, "config_options", {})
+                if name in options:
+                    return options[name]
+        elif self._remote_place_declared():
+            raise KeyError(
+                f"option '{name}' may be provided by a RemotePlace, but it has not been "
+                f"instantiated for target '{self.name}' yet"
+            )
+
+        if default is None:
+            raise KeyError(f"no option '{name}' found for target '{self.name}'")
+        return default
+
+    def _remote_place_declared(self):
+        """Return True if the env config declares a RemotePlace for this target."""
+        if self.env is None:
+            return False
+        target_config = self.env.config.get_targets().get(self.name) or {}
+        for item in target_factory._convert_to_named_list(target_config.get("resources", {})):
+            if item["cls"] == "RemotePlace":
+                return True
+        return False
+
     def get_strategy(self):
         """
         Helper function to get the strategy of the target.
