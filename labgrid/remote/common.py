@@ -11,6 +11,8 @@ from fnmatch import fnmatchcase
 
 import attr
 
+from yaml import YAMLError
+
 from .generated import labgrid_coordinator_pb2
 from ..util.yaml import load
 
@@ -232,7 +234,7 @@ class Place:
     created = attr.ib(default=attr.Factory(time.time))
     changed = attr.ib(default=attr.Factory(time.time))
     reservation = attr.ib(default=None)
-    remote_env = attr.ib(default=None)
+    config = attr.ib(default=None)
 
     def __attrs_post_init__(self):
         self.logger = logging.getLogger(f"{self}")
@@ -257,7 +259,7 @@ class Place:
             "created": self.created,
             "changed": self.changed,
             "reservation": self.reservation,
-            "remote_env": self.remote_env,
+            "config": self.config,
         }
 
     def update_from_pb2(self, place_pb2):
@@ -305,15 +307,44 @@ class Place:
         print(indent + f"changed: {datetime.fromtimestamp(self.changed)}")
         if self.reservation:
             print(indent + f"reservation: {self.reservation}")
-        if self.remote_env:
-            print(indent + "remote env:")
-            print(textwrap.indent(self.remote_env, indent + "  "))
+        if self.config:
+            print(indent + "config:")
+            print(textwrap.indent(self.config, indent + "  "))
 
-    def get_remote_env(self):
-        if self.remote_env:
-            return load(self.remote_env)
+    def get_config(self):
+        """Parse this place's config YAML into a dict.
 
-        return {}
+        The config is stored on the coordinator as free-form YAML text. It is
+        treated as untrusted input here: anything that is not a mapping is
+        rejected with a clear error naming the affected place.
+
+        Returns an empty dict if no config is set.
+
+        Raises:
+            InvalidConfigError: if the config is not valid YAML or its root is
+                not a mapping.
+        """
+        # imported lazily to avoid a circular import (exceptions imports nothing
+        # heavy, but keep parsing errors close to their use)
+        from ..exceptions import InvalidConfigError
+
+        if not self.config:
+            return {}
+
+        try:
+            data = load(self.config)
+        except YAMLError as e:
+            raise InvalidConfigError(f"config of place '{self.name}' is not valid YAML: {e}") from e
+
+        if data is None:
+            return {}
+
+        if not isinstance(data, dict):
+            raise InvalidConfigError(
+                f"config of place '{self.name}' must be a YAML mapping, got {type(data).__name__}"
+            )
+
+        return data
 
     def getmatch(self, resource_path):
         """Return the ResourceMatch object for the given resource path or None if not found.
@@ -366,8 +397,8 @@ class Place:
             place.created = self.created
             if self.reservation:
                 place.reservation = self.reservation
-            if self.remote_env:
-                place.remote_env = self.remote_env
+            if self.config:
+                place.config = self.config
             for key, value in self.tags.items():
                 place.tags[key] = value
             return place
@@ -395,7 +426,7 @@ class Place:
             created=pb2.created,
             changed=pb2.changed,
             reservation=pb2.reservation if pb2.HasField("reservation") else None,
-            remote_env=pb2.remote_env if pb2.HasField("remote_env") else None,
+            config=pb2.config if pb2.HasField("config") else None,
         )
 
     def __str__(self):

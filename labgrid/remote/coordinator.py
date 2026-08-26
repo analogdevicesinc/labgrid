@@ -31,6 +31,13 @@ from .generated import labgrid_coordinator_pb2_grpc
 from ..util import atomic_replace, labgrid_version, yaml, Timeout
 
 
+def _migrate_place_config(config):
+    """Migrate the persisted pre-config place field in place."""
+    if "remote_env" in config:
+        config.setdefault("config", config.pop("remote_env"))
+    return config
+
+
 @contextmanager
 def warn_if_slow(prefix, *, level=logging.WARNING, limit=0.1):
     monotonic = time.monotonic()
@@ -294,6 +301,7 @@ class Coordinator(labgrid_coordinator_pb2_grpc.CoordinatorServicer):
             with open("places.yaml", "r") as f:
                 self.places = yaml.load(f.read())
             for placename, config in self.places.items():
+                _migrate_place_config(config)
                 config["name"] = placename
                 # FIXME maybe recover previously acquired places here?
                 if "acquired" in config:
@@ -603,11 +611,7 @@ class Coordinator(labgrid_coordinator_pb2_grpc.CoordinatorServicer):
         self.save_later()
         return labgrid_coordinator_pb2.SetPlaceCommentResponse()
 
-    @locked
-    async def SetPlaceRemoteEnv(self, request, context):
-        placename = request.placename
-        changed = request.changed
-        remote_env = request.remote_env
+    async def _set_place_config(self, placename, changed, config, context):
         try:
             place = self.places[placename]
         except KeyError:
@@ -615,13 +619,24 @@ class Coordinator(labgrid_coordinator_pb2_grpc.CoordinatorServicer):
 
         if place.changed != changed:
             await context.abort(
-                grpc.StatusCode.FAILED_PRECONDITION, "Config was changed elsewhere during during your edit"
+                grpc.StatusCode.FAILED_PRECONDITION,
+                "Place config was changed elsewhere during your edit, please retry",
             )
 
-        place.remote_env = remote_env
+        place.config = config or None
         place.touch()
         self._publish_place(place)
         self.save_later()
+
+    @locked
+    async def SetPlaceConfig(self, request, context):
+        await self._set_place_config(request.placename, request.changed, request.config, context)
+        return labgrid_coordinator_pb2.SetPlaceConfigResponse()
+
+    @locked
+    async def SetPlaceRemoteEnv(self, request, context):
+        """Deprecated compatibility alias for SetPlaceConfig."""
+        await self._set_place_config(request.placename, request.changed, request.remote_env, context)
         return labgrid_coordinator_pb2.SetPlaceRemoteEnvResponse()
 
     @locked
