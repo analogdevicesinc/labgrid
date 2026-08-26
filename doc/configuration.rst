@@ -1801,9 +1801,106 @@ them to the internal environment.
 
 Arguments:
   - name (str): name or pattern of the remote place
+  - ignore_resources (list): optional, resources from the coordinator-side
+    place config to skip (see `Coordinator-side place config`_)
+  - ignore_drivers (list): optional, drivers from the coordinator-side place
+    config to skip (see `Coordinator-side place config`_)
 
 Used by:
   - potentially all drivers
+
+.. _remote-place-config:
+
+Coordinator-side place config
+++++++++++++++++++++++++++++++
+In addition to the resources exported for a place, the coordinator can store a
+small YAML *config* per place. When a `RemotePlace`_ is instantiated, this
+config is fetched from the coordinator and used to augment the target with
+additional resources, drivers and target options. This lets a central place
+description live next to the coordinator instead of being copied into every
+client environment file.
+
+A minimal client environment then only needs the `RemotePlace`_ itself:
+
+.. code-block:: yaml
+
+   targets:
+     main:
+       resources:
+         RemotePlace:
+           name: 'example-place'
+
+The config is edited with ``labgrid-client -p example-place edit`` (see the
+:ref:`labgrid-client` usage documentation). It is a mapping with the optional keys
+``resources``, ``drivers`` and ``options``, using the same syntax as a target
+in an environment file:
+
+.. code-block:: yaml
+
+   resources:
+   - NetworkService:
+       address: 'board.example.com'
+       username: 'root'
+   drivers:
+   - SSHDriver: {}
+   options:
+     board: 'example-board'
+
+``resources`` and ``drivers`` accept both the list-of-single-entry-mapping form
+shown above and the named form (a nested mapping keyed by an instance name),
+just like a normal target config.
+
+Precedence and merging:
+  - Resources and drivers from the place config are added *alongside* any
+    resources and drivers configured locally in the client environment; they do
+    not replace them. Where both sides provide instances of the same class,
+    disambiguate as usual by giving them distinct names and selecting by name.
+  - Target options set locally in the environment take precedence over options
+    from the place config. Use :any:`Target.get_option` to read an option that
+    may come from either source (local wins, remote is the fallback).
+
+Skipping entries:
+  If a client needs to override a resource or driver from the place config, it
+  can drop the coordinator-provided entry via ``ignore_resources`` /
+  ``ignore_drivers`` on the local `RemotePlace`_ and provide its own. Each entry
+  is either a class name (matching all instances of that class) or a mapping
+  ``{cls: <class>, name: <instance-name>}`` (matching one named instance):
+
+  .. code-block:: yaml
+
+     targets:
+       main:
+         resources:
+           RemotePlace:
+             name: 'example-place'
+             ignore_resources:
+             - 'NetworkService'                       # by class
+             - {cls: 'NetworkService', name: 'aux'}   # by class + name
+           # provide a local replacement
+           NetworkService:
+             address: 'board.lab.example.com'
+
+Nested remote places:
+  A ``RemotePlace`` entry inside a place config is ignored to prevent recursion;
+  a place config cannot pull in another remote place.
+
+Validation:
+  The place config is treated as untrusted input. It must be a YAML mapping,
+  reference only known resource and driver classes, and use valid ignore
+  selectors; ``options`` must be a mapping. Invalid config raises
+  :any:`InvalidConfigError` naming the affected place and the problem.
+
+Persistence:
+  The place config is stored by the coordinator together with the rest of the
+  place metadata and survives coordinator restarts.
+
+Security:
+  Editing a place config is not gated by acquiring the place, matching the other
+  place metadata mutations (comment, tags, matches). Any client that can reach
+  the coordinator can change a place config, and that config causes drivers to
+  be instantiated in every client that uses the place. Only grant coordinator
+  access to trusted users, and review the config of places you did not set up
+  yourself.
 
 DockerDaemon
 ~~~~~~~~~~~~
