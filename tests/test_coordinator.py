@@ -3,6 +3,7 @@ import pytest
 import grpc
 import labgrid.remote.generated.labgrid_coordinator_pb2_grpc as labgrid_coordinator_pb2_grpc
 import labgrid.remote.generated.labgrid_coordinator_pb2 as labgrid_coordinator_pb2
+from labgrid.remote.coordinator import _migrate_place_config
 
 
 @pytest.fixture(scope="function")
@@ -145,6 +146,29 @@ def test_coordinator_place_set_comment(coordinator, coordinator_place):
     stub = coordinator_place
     res = stub.SetPlaceComment(labgrid_coordinator_pb2.SetPlaceCommentRequest(placename="test", comment="testcomment"))
     assert res
+
+
+def test_coordinator_place_set_config_legacy_alias(coordinator, coordinator_place):
+    stub = coordinator_place
+    place = next(p for p in stub.GetPlaces(labgrid_coordinator_pb2.GetPlacesRequest()).places if p.name == "test")
+    res = stub.SetPlaceRemoteEnv(
+        labgrid_coordinator_pb2.SetPlaceRemoteEnvRequest(
+            placename="test", changed=place.changed, remote_env="resources: {}"
+        )
+    )
+    assert res
+    updated = next(p for p in stub.GetPlaces(labgrid_coordinator_pb2.GetPlacesRequest()).places if p.name == "test")
+    assert updated.config == "resources: {}"
+
+
+def test_migrate_legacy_place_config():
+    config = {"remote_env": "resources: {}"}
+    assert _migrate_place_config(config) == {"config": "resources: {}"}
+
+
+def test_migrate_place_config_prefers_new_field():
+    config = {"remote_env": "legacy", "config": "new"}
+    assert _migrate_place_config(config) == {"config": "new"}
 
 
 def test_coordinator_place_add_match(coordinator, coordinator_place):

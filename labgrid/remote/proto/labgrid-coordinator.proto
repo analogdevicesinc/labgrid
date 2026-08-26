@@ -39,6 +39,9 @@ service Coordinator {
 
   rpc GetReservations(GetReservationsRequest) returns (GetReservationsResponse) {}
 
+  rpc SetPlaceConfig(SetPlaceConfigRequest) returns (SetPlaceConfigResponse) {}
+
+  // Deprecated compatibility alias for clients using the old remote_env name.
   rpc SetPlaceRemoteEnv(SetPlaceRemoteEnvRequest) returns (SetPlaceRemoteEnvResponse) {}
 }
 
@@ -169,7 +172,7 @@ message Place {
   double created = 9;
   double changed = 10;
   optional string reservation = 11;
-  optional string remote_env = 12;
+  optional string config = 12;
 };
 
 message ResourceMatch {
@@ -299,11 +302,22 @@ message GetReservationsResponse {
 message GetReservationsRequest {
 };
 
+message SetPlaceConfigRequest {
+  string placename = 1;
+  double changed = 2;
+  string config = 3;
+};
+
+message SetPlaceConfigResponse {
+};
+
+// Deprecated: use SetPlaceConfigRequest instead.
 message SetPlaceRemoteEnvRequest {
   string placename = 1;
   double changed = 2;
   string remote_env = 3;
 };
 
+// Deprecated: use SetPlaceConfigResponse instead.
 message SetPlaceRemoteEnvResponse {
 };
