@@ -4,6 +4,7 @@ coordinator, acquire a place and interact with the connected resources"""
 import argparse
 import asyncio
 import contextlib
+import copy
 from contextvars import ContextVar
 import enum
 import os
@@ -872,22 +873,32 @@ class ClientSession:
         return resources
 
     def get_target_config(self, place):
-        remote_env = place.get_remote_env()
-        config = {}
-        # resources from remote env
-        resources = config["resources"] = remote_env.get("resources", [])
+        place_config = place.get_config()
 
-        # resources by match
+        def normalize_entries(entries):
+            normalized = []
+            for item in target_factory._convert_to_named_list(entries):
+                item = item.copy()
+                cls = item.pop("cls")
+                if item.get("name") is None:
+                    item.pop("name", None)
+                normalized.append({cls: item})
+            return normalized
+
+        config = {
+            "resources": normalize_entries(place_config.get("resources", [])),
+            "drivers": normalize_entries(place_config.get("drivers", [])),
+        }
+        if "options" in place_config:
+            config["options"] = copy.deepcopy(place_config["options"])
+
+        resources = config["resources"]
         for (name, _), resource in self.get_target_resources(place).items():
             args = OrderedDict()
             if name != resource.cls:
                 args["name"] = name
             args.update(resource.args)
             resources.append({resource.cls: args})
-
-        # drivers from remote env
-        config["drivers"] = remote_env.get("drivers", [])
-
         return config
 
     def print_env(self):
@@ -1792,85 +1803,104 @@ class ClientSession:
         scrcpy_cmd += self.args.leftover
         subprocess.run(scrcpy_cmd, env=env_var, check=True)
 
-    async def edit_remote_env(self):
-        place = self.get_idle_place()
+    @staticmethod
+    def _open_in_editor(text):
+        """Open ``text`` in the user's editor and return the edited content.
+
+        Uses ``$EDITOR`` (falling back to ``vi``) and a temporary file that is
+        always cleaned up.
+        """
         editor = os.environ.get("EDITOR", "vi")
-        remote_env = place.remote_env or ""
-        # remember last place change to be sent with SetPlaceRemoteEnvRequest for optimistic locking
-        changed = place.changed
-
-        # write current remote env to temporary file
-        with tempfile.NamedTemporaryFile(mode="w+", suffix=".tmp", delete=False, encoding="utf-8") as f:
+        with tempfile.NamedTemporaryFile(mode="w+", suffix=".yaml", delete=False, encoding="utf-8") as f:
             path = f.name
-            f.write(remote_env)
+            f.write(text)
             f.flush()
-
         try:
-            while True:
-                # open editor
-                subprocess.run(shlex.split(editor) + [path], check=True)
-
-                # process new config
-                with open(path, "r", encoding="utf-8") as f:
-                    new_remote_env = f.read()
-
-                    # sanity check new config
-                    try:
-                        with warnings.catch_warnings():
-                            # turn UserWarnings emitted by labgrid.util's dict/yaml into exceptions to catch them
-                            warnings.simplefilter("error", UserWarning)
-                            # parse config
-                            remote_conf = load(new_remote_env) or {}
-                            # try to instantiate resources and drivers without a target and bindings
-                            # (place is idle, resources cannot be bound, config may be incomplete)
-                            target_factory.make_resources_from_config(None, remote_conf.get("resources", {}))
-                            target_factory.make_drivers_from_config(None, remote_conf.get("drivers", {}))
-                    except Exception as e:
-                        # let user decide on errors during sanity checks
-                        if self.args.debug:
-                            traceback.print_exc(file=sys.stderr)
-                        else:
-                            print(f"Error: {e}")
-                        key = None
-                        while key is None or key.lower() not in ("", "y", "n", "q"):
-                            key = input("Save anyway? [y]es, [N]o and reopen editor, [q]uit without saving ")
-
-                        if key.lower() == "y":
-                            # continue saving
-                            pass
-                        elif key.lower() == "q":
-                            return
-                        else:
-                            # start over again
-                            continue
-
-                    # save remote env
-                    try:
-                        request = labgrid_coordinator_pb2.SetPlaceRemoteEnvRequest(
-                            placename=place.name, changed=changed, remote_env=new_remote_env
-                        )
-                        await self.stub.SetPlaceRemoteEnv(request)
-                        await self.sync_with_coordinator()
-                        return
-                    except grpc.aio.AioRpcError as e:
-                        if self.args.debug:
-                            traceback.print_exc(file=sys.stderr)
-                        else:
-                            print(f"Error: {e.details()}")
-                        while key.lower() not in ("", "y", "n"):
-                            key = input("Reopen editor? [Y]es, n[o] ")
-
-                        if key.lower() == "n":
-                            return
-                        else:
-                            # start over again
-                            continue
+            subprocess.run(shlex.split(editor) + [path], check=True)
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read()
         finally:
-            # clean up temporary file
             try:
                 os.remove(path)
             except FileNotFoundError:
                 pass
+
+    @staticmethod
+    def _validate_place_config(text):
+        """Parse and structurally validate place config text.
+
+        Raises the underlying exception (``InvalidConfigError``, ``YAMLError``,
+        or ``UserWarning`` turned into an error) on invalid input.
+        """
+        with warnings.catch_warnings():
+            # turn UserWarnings emitted by labgrid.util's dict/yaml into errors
+            warnings.simplefilter("error", UserWarning)
+            config = load(text) or {}
+            if not isinstance(config, dict):
+                raise InvalidConfigError(f"config must be a YAML mapping, got {type(config).__name__}")
+            # structural check only: no instantiation, no side effects
+            target_factory.validate_config(config)
+
+    async def _save_place_config(self, place, changed, text):
+        """Send the new place config to the coordinator (optimistic locking)."""
+        request = labgrid_coordinator_pb2.SetPlaceConfigRequest(placename=place.name, changed=changed, config=text)
+        await self.stub.SetPlaceConfig(request)
+        await self.sync_with_coordinator()
+
+    def _prompt_choice(self, question, choices, default):
+        """Prompt until the user picks one of ``choices`` (empty input -> default)."""
+        while True:
+            key = input(question).strip().lower()
+            if key == "":
+                return default
+            if key in choices:
+                return key
+
+    async def edit_place_config(self):
+        """Edit a place's coordinator-side config in ``$EDITOR``.
+
+        The place must be idle. The config is validated locally before it is
+        sent to the coordinator; on validation or save errors the user is
+        prompted to reopen the editor, save anyway, or quit.
+        """
+        place = self.get_idle_place()
+        # remember the last change to detect concurrent edits (optimistic locking)
+        changed = place.changed
+        text = place.config or ""
+
+        while True:
+            text = self._open_in_editor(text)
+
+            try:
+                self._validate_place_config(text)
+            except Exception as e:
+                if self.args.debug:
+                    traceback.print_exc(file=sys.stderr)
+                else:
+                    print(f"Error: {e}")
+                choice = self._prompt_choice(
+                    "Save anyway? [y]es, [N]o and reopen editor, [q]uit without saving ",
+                    ("y", "n", "q"),
+                    default="n",
+                )
+                if choice == "q":
+                    return
+                if choice == "n":
+                    continue
+                # choice == "y": fall through to save
+
+            try:
+                await self._save_place_config(place, changed, text)
+                return
+            except grpc.aio.AioRpcError as e:
+                if self.args.debug:
+                    traceback.print_exc(file=sys.stderr)
+                else:
+                    print(f"Error: {e.details()}")
+                choice = self._prompt_choice("Reopen editor? [Y]es, [n]o ", ("y", "n"), default="y")
+                if choice == "n":
+                    return
+                # reopen editor with the same text
 
 
 _loop: ContextVar["asyncio.AbstractEventLoop | None"] = ContextVar("_loop", default=None)
@@ -2479,8 +2509,8 @@ def get_parser(auto_doc_mode=False) -> "argparse.ArgumentParser | AutoProgramArg
     scrcpy_subparser.add_argument("--name", "-n", help="optional resource name")
     scrcpy_subparser.set_defaults(func=ClientSession.scrcpy)
 
-    subparser = subparsers.add_parser("edit", help="edit place's remote environment")
-    subparser.set_defaults(func=ClientSession.edit_remote_env)
+    subparser = subparsers.add_parser("edit", help="edit the place's coordinator-side config")
+    subparser.set_defaults(func=ClientSession.edit_place_config)
 
     return parser
 
