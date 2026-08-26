@@ -1,9 +1,34 @@
+import warnings
 from collections import OrderedDict
 
 import pytest
 
 from labgrid.config import Config
 from labgrid.exceptions import InvalidConfigError
+
+
+@pytest.fixture(autouse=True)
+def _ignore_get_target_option_deprecation():
+    # Config.get_target_option() is deprecated in favor of Target.get_option();
+    # these tests still cover the (kept) internal accessor's semantics.
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*get_target_option.*")
+        yield
+
+
+def test_get_target_option_deprecated(tmpdir):
+    p = tmpdir.join("config.yaml")
+    p.write(
+        """
+        targets:
+          main:
+            options:
+              str: test
+        """
+    )
+    c = Config(str(p))
+    with pytest.warns(DeprecationWarning, match="get_target_option"):
+        assert c.get_target_option("main", "str") == "test"
 
 
 def test_get_target_option(tmpdir):
