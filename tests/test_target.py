@@ -503,6 +503,38 @@ def test_target_activate_rolls_back_nested_suppliers(target):
     ]
 
 
+def test_target_activate_rolls_back_when_nested_supplier_fails(target):
+    events = []
+
+    class ActivatableResource(Resource):
+        def on_activate(self):
+            events.append("resource_activate")
+
+        def on_deactivate(self):
+            events.append("resource_deactivate")
+
+    class FailingIntermediateDriver(Driver):
+        bindings = {"resource": ActivatableResource}
+
+        def on_activate(self):
+            raise RuntimeError("supplier activation failed")
+
+    class ParentDriver(Driver):
+        bindings = {"driver": FailingIntermediateDriver}
+
+    resource = ActivatableResource(target, "resource")
+    intermediate = FailingIntermediateDriver(target, "intermediate")
+    driver = ParentDriver(target, "driver")
+
+    with pytest.raises(RuntimeError, match="supplier activation failed"):
+        target.activate(driver)
+
+    assert resource.state is BindingState.bound
+    assert intermediate.state is BindingState.bound
+    assert driver.state is BindingState.bound
+    assert events == ["resource_activate", "resource_deactivate"]
+
+
 def test_target_activate_keeps_previously_active_supplier(target):
     class ResourceA(Resource):
         pass
@@ -522,6 +554,97 @@ def test_target_activate_keeps_previously_active_supplier(target):
 
     assert resource.state is BindingState.active
     assert driver.state is BindingState.bound
+
+
+def test_target_activate_restores_conflicting_driver(target):
+    class ConflictingResource(Resource):
+        def resolve_conflicts(self, client):
+            for other in self.clients:
+                if other is not client:
+                    self.target.deactivate(other)
+
+    class StableDriver(Driver):
+        bindings = {"resource": ConflictingResource}
+
+    class FailingDriver(Driver):
+        bindings = {"resource": ConflictingResource}
+
+        def on_activate(self):
+            raise RuntimeError("activation failed")
+
+    resource = ConflictingResource(target, "resource")
+    stable = StableDriver(target, "stable")
+    failing = FailingDriver(target, "failing")
+    target.activate(stable)
+
+    with pytest.raises(RuntimeError, match="activation failed"):
+        target.activate(failing)
+
+    assert resource.state is BindingState.active
+    assert stable.state is BindingState.active
+    assert failing.state is BindingState.bound
+
+
+def test_target_activate_preserves_original_error_on_restore_failure(target):
+    activation_attempts = []
+
+    class ConflictingResource(Resource):
+        def resolve_conflicts(self, client):
+            for other in self.clients:
+                if other is not client:
+                    self.target.deactivate(other)
+
+    class UnrestorableDriver(Driver):
+        bindings = {"resource": ConflictingResource}
+
+        def on_activate(self):
+            activation_attempts.append(None)
+            if len(activation_attempts) > 1:
+                raise RuntimeError("restore failed")
+
+    class FailingDriver(Driver):
+        bindings = {"resource": ConflictingResource}
+
+        def on_activate(self):
+            raise RuntimeError("activation failed")
+
+    resource = ConflictingResource(target, "resource")
+    stable = UnrestorableDriver(target, "stable")
+    failing = FailingDriver(target, "failing")
+    target.activate(stable)
+
+    with pytest.raises(RuntimeError, match="activation failed"):
+        target.activate(failing)
+
+    assert resource.state is BindingState.active
+    assert stable.state is BindingState.bound
+    assert failing.state is BindingState.bound
+
+
+def test_target_activate_preserves_original_error_on_rollback_failure(target):
+    deactivate_attempts = []
+
+    class UncleanResource(Resource):
+        def on_deactivate(self):
+            deactivate_attempts.append(None)
+            if len(deactivate_attempts) == 1:
+                raise RuntimeError("rollback failed")
+
+    class FailingDriver(Driver):
+        bindings = {"resource": UncleanResource}
+
+        def on_activate(self):
+            raise RuntimeError("activation failed")
+
+    resource = UncleanResource(target, "resource")
+    driver = FailingDriver(target, "driver")
+
+    with pytest.raises(RuntimeError, match="activation failed"):
+        target.activate(driver)
+
+    assert resource.state is BindingState.active
+    assert driver.state is BindingState.bound
+
 
 def test_allow_binding_by_different_protocols(target):
     class ADiffProtocol(abc.ABC):

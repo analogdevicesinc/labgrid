@@ -438,7 +438,8 @@ class Target:
         deactivating other clients.
 
         If activation fails, objects activated as part of this call are
-        deactivated again.
+        deactivated again and restoration of objects active before the call is
+        attempted.
         """
         # don't activate strategies, they usually have conflicting bindings
         if isinstance(client, Strategy):
@@ -450,6 +451,11 @@ class Target:
 
         assert client is not None
 
+        active_before = [
+            bindable
+            for bindable in self.resources + self.drivers
+            if bindable.state is BindingState.active
+        ]
         activated = []
         try:
             self._activate(client, activated)
@@ -463,6 +469,15 @@ class Target:
                     self.log.exception(
                         "failed to rollback activation of %s",
                         activated_client.display_name,
+                    )
+            for bindable in active_before:
+                if bindable.state is not BindingState.bound:
+                    continue
+                try:
+                    self.activate(bindable)
+                except Exception:
+                    self.log.exception(
+                        "failed to restore activation of %s", bindable.display_name
                     )
             raise
 
