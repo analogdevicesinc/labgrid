@@ -5,7 +5,7 @@ import attr
 import pytest
 
 from labgrid import Target, target_factory
-from labgrid.binding import BindingError
+from labgrid.binding import BindingError, BindingState
 from labgrid.resource import Resource
 from labgrid.driver import Driver
 from labgrid.strategy import Strategy
@@ -431,6 +431,97 @@ def test_target_activate_by_string(target):
     target.activate("AActiv")
 
     assert a == target.get_active_driver(AActiv)
+
+
+def test_target_activate_rolls_back_newly_activated_suppliers(target):
+    events = []
+
+    class ActivatableResource(Resource):
+        def on_activate(self):
+            events.append("resource_activate")
+
+        def on_deactivate(self):
+            events.append("resource_deactivate")
+
+    class FailingDriver(Driver):
+        bindings = {"resource": ActivatableResource}
+
+        def on_activate(self):
+            raise RuntimeError("activation failed")
+
+    resource = ActivatableResource(target, "resource")
+    driver = FailingDriver(target, "driver")
+
+    with pytest.raises(RuntimeError, match="activation failed"):
+        target.activate(driver)
+
+    assert resource.state is BindingState.bound
+    assert driver.state is BindingState.bound
+    assert events == ["resource_activate", "resource_deactivate"]
+
+
+def test_target_activate_rolls_back_nested_suppliers(target):
+    events = []
+
+    class ActivatableResource(Resource):
+        def on_activate(self):
+            events.append("resource_activate")
+
+        def on_deactivate(self):
+            events.append("resource_deactivate")
+
+    class IntermediateDriver(Driver):
+        bindings = {"resource": ActivatableResource}
+
+        def on_activate(self):
+            events.append("intermediate_activate")
+
+        def on_deactivate(self):
+            events.append("intermediate_deactivate")
+
+    class FailingDriver(Driver):
+        bindings = {"driver": IntermediateDriver}
+
+        def on_activate(self):
+            raise RuntimeError("activation failed")
+
+    resource = ActivatableResource(target, "resource")
+    intermediate = IntermediateDriver(target, "intermediate")
+    driver = FailingDriver(target, "driver")
+
+    with pytest.raises(RuntimeError, match="activation failed"):
+        target.activate(driver)
+
+    assert resource.state is BindingState.bound
+    assert intermediate.state is BindingState.bound
+    assert driver.state is BindingState.bound
+    assert events == [
+        "resource_activate",
+        "intermediate_activate",
+        "intermediate_deactivate",
+        "resource_deactivate",
+    ]
+
+
+def test_target_activate_keeps_previously_active_supplier(target):
+    class ResourceA(Resource):
+        pass
+
+    class FailingDriver(Driver):
+        bindings = {"resource": ResourceA}
+
+        def on_activate(self):
+            raise RuntimeError("activation failed")
+
+    resource = ResourceA(target, "resource")
+    target.activate(resource)
+    driver = FailingDriver(target, "driver")
+
+    with pytest.raises(RuntimeError, match="activation failed"):
+        target.activate(driver)
+
+    assert resource.state is BindingState.active
+    assert driver.state is BindingState.bound
 
 def test_allow_binding_by_different_protocols(target):
     class ADiffProtocol(abc.ABC):
