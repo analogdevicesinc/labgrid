@@ -3,10 +3,15 @@ import asyncio
 import pexpect
 import pytest
 import grpc
+import signal
+import sys
+import time
 from labgrid import Environment, Target
 from labgrid.remote.coordinator import get_server_credentials
 from labgrid.remote.common import get_client_credentials
 from labgrid.remote.exporter import Exporter, SerialPortExport
+from labgrid.remote.generated import labgrid_coordinator_pb2
+from labgrid.remote.generated import labgrid_coordinator_pb2_grpc
 from labgrid.resource import RemotePlace
 from labgrid.resource.common import ResourceManager
 from labgrid.util.yaml import dump
@@ -83,6 +88,71 @@ def test_exporter_message_pump_propagates_grpc_error():
         assert excinfo.value.code() is grpc.StatusCode.ALREADY_EXISTS
 
     asyncio.run(run())
+
+
+def test_exporter_restart_after_request_failure(coordinator, tmpdir):
+    name = "restart-test"
+    working_config = tmpdir.join("working.yaml")
+    working_config.write(
+        """
+    Working:
+        NetworkSerialPort:
+          host: 'localhost'
+          port: 4000
+    """
+    )
+
+    def broken_exporter_messages():
+        startup = labgrid_coordinator_pb2.ExporterInMessage()
+        startup.startup.version = "test"
+        startup.startup.name = name
+        yield startup
+
+        # No command is pending, so this makes the coordinator request task
+        # fail after it has already created the exporter session.
+        response = labgrid_coordinator_pb2.ExporterInMessage()
+        response.response.success = True
+        yield response
+
+    channel = grpc.insecure_channel("127.0.0.1:20408")
+    stream = labgrid_coordinator_pb2_grpc.CoordinatorStub(channel).ExporterStream(
+        broken_exporter_messages(), wait_for_ready=True
+    )
+    try:
+        hello = next(stream)
+        assert hello.WhichOneof("kind") == "hello"
+    finally:
+        stream.cancel()
+        channel.close()
+
+    deadline = time.monotonic() + 10
+    ready = None
+    last_output = b""
+    while ready is None and time.monotonic() < deadline:
+        exporter = pexpect.spawn(
+            f"{sys.executable} -m labgrid.remote.exporter --name {name} {working_config}",
+            cwd=tmpdir,
+        )
+        try:
+            timeout = min(2, max(0.1, deadline - time.monotonic()))
+            result = exporter.expect(["Exporter ready", pexpect.EOF], timeout=timeout)
+            if result == 0:
+                ready = exporter
+                break
+            last_output = exporter.before
+        except pexpect.TIMEOUT:
+            last_output = exporter.before
+        finally:
+            if ready is not exporter:
+                if exporter.isalive():
+                    exporter.kill(signal.SIGKILL)
+                exporter.close()
+        time.sleep(0.1)
+
+    assert ready is not None, last_output
+    ready.kill(signal.SIGTERM)
+    ready.expect(pexpect.EOF, timeout=10)
+    ready.close()
 
 
 def test_exporter_coordinator_becomes_unreachable(coordinator, exporter):
