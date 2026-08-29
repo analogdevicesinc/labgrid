@@ -1,9 +1,12 @@
 import argparse
+import asyncio
 import pexpect
 import pytest
+import grpc
 from labgrid import Environment, Target
 from labgrid.remote.coordinator import get_server_credentials
 from labgrid.remote.common import get_client_credentials
+from labgrid.remote.exporter import Exporter, SerialPortExport
 from labgrid.resource import RemotePlace
 from labgrid.resource.common import ResourceManager
 from labgrid.util.yaml import dump
@@ -46,6 +49,40 @@ def test_exporter_start_coordinator_unreachable(monkeypatch, tmpdir):
         spawn.expect(pexpect.EOF)
         spawn.close()
         assert spawn.exitstatus == 100, spawn.before
+
+
+def test_serial_port_export_del_before_child_init():
+    export = object.__new__(SerialPortExport)
+
+    export.__del__()
+
+
+def test_exporter_message_pump_propagates_grpc_error():
+    class FailingStream:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise grpc.aio.AioRpcError(
+                grpc.StatusCode.ALREADY_EXISTS,
+                details="exporter already exists",
+            )
+
+    async def run():
+        exporter = object.__new__(Exporter)
+        exporter.out_queue = asyncio.Queue()
+        exporter.stub = type(
+            "Stub",
+            (),
+            {"ExporterStream": lambda self, request: FailingStream()},
+        )()
+
+        with pytest.raises(grpc.aio.AioRpcError) as excinfo:
+            await exporter.message_pump()
+
+        assert excinfo.value.code() is grpc.StatusCode.ALREADY_EXISTS
+
+    asyncio.run(run())
 
 
 def test_exporter_coordinator_becomes_unreachable(coordinator, exporter):
