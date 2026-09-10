@@ -12,7 +12,6 @@ from .udev import (
     AndroidUSBFastboot,
     DFUDevice,
     DeditecRelais8,
-    FTDIGPIO,
     HIDRelay,
     IMXUSBLoader,
     LXAUSBMux,
