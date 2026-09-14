@@ -3,6 +3,7 @@ import argparse
 import logging
 import asyncio
 import traceback
+import json
 from enum import Enum
 from functools import wraps
 import time
@@ -220,6 +221,7 @@ class ExporterError(Exception):
 class Coordinator(labgrid_coordinator_pb2_grpc.CoordinatorServicer):
     def __init__(self) -> None:
         self.places: dict[str, Place] = {}
+        self.history: dict[str, list[dict]] = {}
         self.reservations = {}
         self.poll_tasks = []
         self.save_scheduled = False
@@ -318,7 +320,68 @@ class Coordinator(labgrid_coordinator_pb2_grpc.CoordinatorServicer):
                 self.places[placename] = place
         except FileNotFoundError:
             pass
+        try:
+            with open("history.jsonl", "r") as f:
+                for line in f:
+                    try:
+                        event = json.loads(line)
+                        self.history.setdefault(event["place"], []).append(event)
+                    except (json.JSONDecodeError, KeyError, TypeError):
+                        logging.warning("ignoring malformed history entry")
+        except FileNotFoundError:
+            pass
         logging.info("loaded %s place(s)", len(self.places))
+
+    def _client_name(self, context):
+        try:
+            return self.clients[context.peer()].name
+        except KeyError:
+            return "unknown"
+
+    def _resource_paths(self, place):
+        return ["/".join(resource.path) for resource in place.acquired_resources]
+
+    async def _record_history(
+        self, place, action, *, actor="unknown", owner="", status="succeeded", duration=0.0, resources=None
+    ):
+        event = {
+            "place": place,
+            "timestamp": time.time(),
+            "actor": actor,
+            "owner": owner,
+            "action": action,
+            "status": status,
+            "duration": duration,
+            "resources": resources if resources is not None else [],
+        }
+        if isinstance(place, Place):
+            event["place"] = place.name
+            if resources is None:
+                event["resources"] = self._resource_paths(place)
+        self.history.setdefault(event["place"], []).append(event)
+
+        def append_event():
+            try:
+                with open("history.jsonl", "a") as f:
+                    f.write(json.dumps(event, sort_keys=True) + "\n")
+            except OSError:
+                logging.exception("failed to persist place history")
+
+        await self.loop.run_in_executor(None, append_event)
+
+    def _history_response(self, events):
+        return [
+            labgrid_coordinator_pb2.PlaceHistoryEntry(
+                timestamp=event.get("timestamp", 0.0),
+                actor=event.get("actor", "unknown"),
+                owner=event.get("owner", ""),
+                action=event.get("action", ""),
+                status=event.get("status", ""),
+                duration=event.get("duration", 0.0),
+                resources=event.get("resources", []),
+            )
+            for event in events
+        ]
 
     async def ClientStream(self, request_iterator, context):
         peer = context.peer()
@@ -518,6 +581,7 @@ class Coordinator(labgrid_coordinator_pb2_grpc.CoordinatorServicer):
         logging.debug("Adding %s", name)
         place = Place(name)
         self.places[name] = place
+        await self._record_history(place, "create", actor=self._client_name(context))
         self._publish_place(place)
         self.save_later()
         return labgrid_coordinator_pb2.AddPlaceResponse()
@@ -530,6 +594,7 @@ class Coordinator(labgrid_coordinator_pb2_grpc.CoordinatorServicer):
         if name not in self.places:
             await context.abort(grpc.StatusCode.ALREADY_EXISTS, f"Place {name} does not exist")
         logging.debug("Deleting %s", name)
+        await self._record_history(name, "delete", actor=self._client_name(context))
         del self.places[name]
         msg = labgrid_coordinator_pb2.ClientOutMessage()
         msg.updates.add().del_place = name
@@ -548,6 +613,7 @@ class Coordinator(labgrid_coordinator_pb2_grpc.CoordinatorServicer):
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"Place {placename} does not exist")
         place.aliases.add(alias)
         place.touch()
+        await self._record_history(place, "add-alias", actor=self._client_name(context))
         self._publish_place(place)
         self.save_later()
         return labgrid_coordinator_pb2.AddPlaceAliasResponse()
@@ -565,6 +631,7 @@ class Coordinator(labgrid_coordinator_pb2_grpc.CoordinatorServicer):
         except ValueError:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"Failed to remove {alias} from {placename}")
         place.touch()
+        await self._record_history(place, "del-alias", actor=self._client_name(context))
         self._publish_place(place)
         self.save_later()
         return labgrid_coordinator_pb2.DeletePlaceAliasResponse()
@@ -594,6 +661,7 @@ class Coordinator(labgrid_coordinator_pb2_grpc.CoordinatorServicer):
             else:
                 place.tags[k] = v
         place.touch()
+        await self._record_history(place, "set-tags", actor=self._client_name(context))
         self._publish_place(place)
         self.save_later()
         return labgrid_coordinator_pb2.SetPlaceTagsResponse()
@@ -608,6 +676,7 @@ class Coordinator(labgrid_coordinator_pb2_grpc.CoordinatorServicer):
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"Place {placename} does not exist")
         place.comment = comment
         place.touch()
+        await self._record_history(place, "set-comment", actor=self._client_name(context))
         self._publish_place(place)
         self.save_later()
         return labgrid_coordinator_pb2.SetPlaceCommentResponse()
@@ -654,6 +723,7 @@ class Coordinator(labgrid_coordinator_pb2_grpc.CoordinatorServicer):
             await context.abort(grpc.StatusCode.ALREADY_EXISTS, f"Match {rm} already exists")
         place.matches.append(rm)
         place.touch()
+        await self._record_history(place, "add-match", actor=self._client_name(context))
         self._publish_place(place)
         self.save_later()
         return labgrid_coordinator_pb2.AddPlaceMatchResponse()
@@ -673,6 +743,7 @@ class Coordinator(labgrid_coordinator_pb2_grpc.CoordinatorServicer):
         except ValueError:
             await context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"Match {rm} does not exist in {placename}")
         place.touch()
+        await self._record_history(place, "del-match", actor=self._client_name(context))
         self._publish_place(place)
         self.save_later()
         return labgrid_coordinator_pb2.DeletePlaceMatchResponse()
@@ -920,6 +991,7 @@ class Coordinator(labgrid_coordinator_pb2_grpc.CoordinatorServicer):
             place.acquired = None
             await context.abort(grpc.StatusCode.FAILED_PRECONDITION, f"Failed to acquire resources for place {name}")
         place.touch()
+        await self._record_history(place, "acquire", actor=username, owner=username)
         self._publish_place(place)
         self.save_later()
         self.schedule_reservations()
@@ -942,11 +1014,15 @@ class Coordinator(labgrid_coordinator_pb2_grpc.CoordinatorServicer):
         if fromuser and place.acquired != fromuser:
             return labgrid_coordinator_pb2.ReleasePlaceResponse()
 
+        owner = place.acquired
+        actor = self._client_name(context)
+        resources = self._resource_paths(place)
         await self._release_resources(place, place.acquired_resources)
 
         place.acquired = None
         place.allowed = set()
         place.touch()
+        await self._record_history(name, "release", actor=actor, owner=owner, resources=resources)
         self._publish_place(place)
         self.save_later()
         self.schedule_reservations()
@@ -974,6 +1050,7 @@ class Coordinator(labgrid_coordinator_pb2_grpc.CoordinatorServicer):
             )
         place.allowed.add(user)
         place.touch()
+        await self._record_history(place, "allow", actor=username, owner=place.acquired)
         self._publish_place(place)
         self.save_later()
         return labgrid_coordinator_pb2.AllowPlaceResponse()
@@ -988,6 +1065,32 @@ class Coordinator(labgrid_coordinator_pb2_grpc.CoordinatorServicer):
             return labgrid_coordinator_pb2.GetPlacesResponse(places=[x.as_pb2() for x in self.places.values()])
         except Exception:
             logging.exception("error during get places")
+
+    @locked
+    async def GetPlaceHistory(self, request, context):
+        if request.placename not in self.places:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"Place {request.placename} does not exist")
+        return labgrid_coordinator_pb2.GetPlaceHistoryResponse(
+            events=self._history_response(self.history.get(request.placename, []))
+        )
+
+    @locked
+    async def RecordPlaceActivity(self, request, context):
+        try:
+            place = self.places[request.placename]
+        except KeyError:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, f"Place {request.placename} does not exist")
+        if not request.action or not request.status:
+            await context.abort(grpc.StatusCode.INVALID_ARGUMENT, "action and status are required")
+        await self._record_history(
+            place,
+            request.action,
+            actor=self._client_name(context),
+            owner=place.acquired or "",
+            status=request.status,
+            duration=request.duration,
+        )
+        return labgrid_coordinator_pb2.RecordPlaceActivityResponse()
 
     def schedule_reservations(self):
         # The primary information is stored in the reservations and the places

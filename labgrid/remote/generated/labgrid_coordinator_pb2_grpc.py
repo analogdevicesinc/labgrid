@@ -59,6 +59,16 @@ class CoordinatorStub(object):
                 request_serializer=labgrid__coordinator__pb2.GetPlacesRequest.SerializeToString,
                 response_deserializer=labgrid__coordinator__pb2.GetPlacesResponse.FromString,
                 _registered_method=True)
+        self.GetPlaceHistory = channel.unary_unary(
+                '/labgrid.Coordinator/GetPlaceHistory',
+                request_serializer=labgrid__coordinator__pb2.GetPlaceHistoryRequest.SerializeToString,
+                response_deserializer=labgrid__coordinator__pb2.GetPlaceHistoryResponse.FromString,
+                _registered_method=True)
+        self.RecordPlaceActivity = channel.unary_unary(
+                '/labgrid.Coordinator/RecordPlaceActivity',
+                request_serializer=labgrid__coordinator__pb2.RecordPlaceActivityRequest.SerializeToString,
+                response_deserializer=labgrid__coordinator__pb2.RecordPlaceActivityResponse.FromString,
+                _registered_method=True)
         self.AddPlaceAlias = channel.unary_unary(
                 '/labgrid.Coordinator/AddPlaceAlias',
                 request_serializer=labgrid__coordinator__pb2.AddPlaceAliasRequest.SerializeToString,
@@ -164,6 +174,18 @@ class CoordinatorServicer(object):
         raise NotImplementedError('Method not implemented!')
 
     def GetPlaces(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def GetPlaceHistory(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def RecordPlaceActivity(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -287,6 +309,16 @@ def add_CoordinatorServicer_to_server(servicer, server):
                     servicer.GetPlaces,
                     request_deserializer=labgrid__coordinator__pb2.GetPlacesRequest.FromString,
                     response_serializer=labgrid__coordinator__pb2.GetPlacesResponse.SerializeToString,
+            ),
+            'GetPlaceHistory': grpc.unary_unary_rpc_method_handler(
+                    servicer.GetPlaceHistory,
+                    request_deserializer=labgrid__coordinator__pb2.GetPlaceHistoryRequest.FromString,
+                    response_serializer=labgrid__coordinator__pb2.GetPlaceHistoryResponse.SerializeToString,
+            ),
+            'RecordPlaceActivity': grpc.unary_unary_rpc_method_handler(
+                    servicer.RecordPlaceActivity,
+                    request_deserializer=labgrid__coordinator__pb2.RecordPlaceActivityRequest.FromString,
+                    response_serializer=labgrid__coordinator__pb2.RecordPlaceActivityResponse.SerializeToString,
             ),
             'AddPlaceAlias': grpc.unary_unary_rpc_method_handler(
                     servicer.AddPlaceAlias,
@@ -499,6 +531,60 @@ class Coordinator(object):
             '/labgrid.Coordinator/GetPlaces',
             labgrid__coordinator__pb2.GetPlacesRequest.SerializeToString,
             labgrid__coordinator__pb2.GetPlacesResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def GetPlaceHistory(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/labgrid.Coordinator/GetPlaceHistory',
+            labgrid__coordinator__pb2.GetPlaceHistoryRequest.SerializeToString,
+            labgrid__coordinator__pb2.GetPlaceHistoryResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RecordPlaceActivity(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/labgrid.Coordinator/RecordPlaceActivity',
+            labgrid__coordinator__pb2.RecordPlaceActivityRequest.SerializeToString,
+            labgrid__coordinator__pb2.RecordPlaceActivityResponse.FromString,
             options,
             channel_credentials,
             insecure,

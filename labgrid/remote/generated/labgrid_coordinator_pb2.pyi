@@ -184,6 +184,52 @@ class GetPlacesResponse(_message.Message):
     places: _containers.RepeatedCompositeFieldContainer[Place]
     def __init__(self, places: _Optional[_Iterable[_Union[Place, _Mapping]]] = ...) -> None: ...
 
+class GetPlaceHistoryRequest(_message.Message):
+    __slots__ = ("placename",)
+    PLACENAME_FIELD_NUMBER: _ClassVar[int]
+    placename: str
+    def __init__(self, placename: _Optional[str] = ...) -> None: ...
+
+class GetPlaceHistoryResponse(_message.Message):
+    __slots__ = ("events",)
+    EVENTS_FIELD_NUMBER: _ClassVar[int]
+    events: _containers.RepeatedCompositeFieldContainer[PlaceHistoryEntry]
+    def __init__(self, events: _Optional[_Iterable[_Union[PlaceHistoryEntry, _Mapping]]] = ...) -> None: ...
+
+class RecordPlaceActivityRequest(_message.Message):
+    __slots__ = ("placename", "action", "status", "duration")
+    PLACENAME_FIELD_NUMBER: _ClassVar[int]
+    ACTION_FIELD_NUMBER: _ClassVar[int]
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    DURATION_FIELD_NUMBER: _ClassVar[int]
+    placename: str
+    action: str
+    status: str
+    duration: float
+    def __init__(self, placename: _Optional[str] = ..., action: _Optional[str] = ..., status: _Optional[str] = ..., duration: _Optional[float] = ...) -> None: ...
+
+class RecordPlaceActivityResponse(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class PlaceHistoryEntry(_message.Message):
+    __slots__ = ("timestamp", "actor", "owner", "action", "status", "duration", "resources")
+    TIMESTAMP_FIELD_NUMBER: _ClassVar[int]
+    ACTOR_FIELD_NUMBER: _ClassVar[int]
+    OWNER_FIELD_NUMBER: _ClassVar[int]
+    ACTION_FIELD_NUMBER: _ClassVar[int]
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    DURATION_FIELD_NUMBER: _ClassVar[int]
+    RESOURCES_FIELD_NUMBER: _ClassVar[int]
+    timestamp: float
+    actor: str
+    owner: str
+    action: str
+    status: str
+    duration: float
+    resources: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(self, timestamp: _Optional[float] = ..., actor: _Optional[str] = ..., owner: _Optional[str] = ..., action: _Optional[str] = ..., status: _Optional[str] = ..., duration: _Optional[float] = ..., resources: _Optional[_Iterable[str]] = ...) -> None: ...
+
 class Place(_message.Message):
     __slots__ = ("name", "aliases", "comment", "tags", "matches", "acquired", "acquired_resources", "allowed", "created", "changed", "reservation", "config")
     class TagsEntry(_message.Message):
