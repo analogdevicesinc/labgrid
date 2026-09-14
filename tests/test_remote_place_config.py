@@ -6,25 +6,26 @@ These tests exercise:
 - local vs remote precedence, ignore selectors, nested RemotePlace handling
 - Target.get_option() merging local and remote options
 """
+
 from unittest.mock import Mock, patch
 
 import pytest
 
-from labgrid import Target
+from labgrid import Target, step
 from labgrid.exceptions import InvalidConfigError
 from labgrid.factory import target_factory
 from labgrid.remote.common import Place
 from labgrid.resource.remote import (
     RemotePlace,
     RemotePlaceManager,
-    _normalize_ignore,
     _is_ignored,
+    _normalize_ignore,
 )
-
 
 # ---------------------------------------------------------------------------
 # Place.get_config()
 # ---------------------------------------------------------------------------
+
 
 def test_get_config_empty():
     assert Place(name="p", config=None).get_config() == {}
@@ -136,6 +137,57 @@ def setup_manager(place, resource_entries=None):
 def instantiate(target, manager, **remote_place_kwargs):
     with patch.object(manager, "_start"):
         return RemotePlace(target, "test-place", **remote_place_kwargs)
+
+
+class ActivityDriver:
+    def __init__(self, target):
+        self.target = target
+
+    @step(title="load")
+    def load(self, fail=False):
+        if fail:
+            raise RuntimeError("failed")
+
+
+def test_remote_step_activity(target):
+    place = make_place()
+    manager = setup_manager(place)
+    manager.session._record_activity_sync = Mock()
+    instantiate(target, manager)
+
+    ActivityDriver(target).load()
+
+    calls = manager.session._record_activity_sync.call_args_list
+    assert len(calls) == 2
+    assert calls[0].args == (place, "ActivityDriver.load", "started", 0.0)
+    assert calls[1].args[:3] == (place, "ActivityDriver.load", "succeeded")
+    assert calls[1].args[3] >= 0.0
+
+
+def test_remote_step_activity_failure(target):
+    place = make_place()
+    manager = setup_manager(place)
+    manager.session._record_activity_sync = Mock()
+    instantiate(target, manager)
+
+    with pytest.raises(RuntimeError, match="failed"):
+        ActivityDriver(target).load(fail=True)
+
+    calls = manager.session._record_activity_sync.call_args_list
+    assert calls[0].args[:3] == (place, "ActivityDriver.load", "started")
+    assert calls[1].args[:3] == (place, "ActivityDriver.load", "failed")
+
+
+def test_remote_step_activity_suppressed_for_client_command(target):
+    place = make_place()
+    manager = setup_manager(place)
+    manager.session._record_activity_sync = Mock()
+    manager.session._activity_depth = 1
+    instantiate(target, manager)
+
+    ActivityDriver(target).load()
+
+    manager.session._record_activity_sync.assert_not_called()
 
 
 def test_remote_config_only(target):
