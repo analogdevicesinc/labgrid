@@ -1,7 +1,8 @@
 from google.protobuf.internal import containers as _containers
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
-from typing import ClassVar as _ClassVar, Iterable as _Iterable, Mapping as _Mapping, Optional as _Optional, Union as _Union
+from collections.abc import Iterable as _Iterable, Mapping as _Mapping
+from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
@@ -37,7 +38,7 @@ class Subscribe(_message.Message):
     is_unsubscribe: bool
     all_places: bool
     all_resources: bool
-    def __init__(self, is_unsubscribe: bool = ..., all_places: bool = ..., all_resources: bool = ...) -> None: ...
+    def __init__(self, is_unsubscribe: _Optional[bool] = ..., all_places: _Optional[bool] = ..., all_resources: _Optional[bool] = ...) -> None: ...
 
 class ClientOutMessage(_message.Message):
     __slots__ = ("sync", "updates")
@@ -106,7 +107,7 @@ class Resource(_message.Message):
     extra: _containers.MessageMap[str, MapValue]
     acquired: str
     avail: bool
-    def __init__(self, path: _Optional[_Union[Resource.Path, _Mapping]] = ..., cls: _Optional[str] = ..., params: _Optional[_Mapping[str, MapValue]] = ..., extra: _Optional[_Mapping[str, MapValue]] = ..., acquired: _Optional[str] = ..., avail: bool = ...) -> None: ...
+    def __init__(self, path: _Optional[_Union[Resource.Path, _Mapping]] = ..., cls: _Optional[str] = ..., params: _Optional[_Mapping[str, MapValue]] = ..., extra: _Optional[_Mapping[str, MapValue]] = ..., acquired: _Optional[str] = ..., avail: _Optional[bool] = ...) -> None: ...
 
 class MapValue(_message.Message):
     __slots__ = ("bool_value", "int_value", "uint_value", "float_value", "string_value")
@@ -120,7 +121,7 @@ class MapValue(_message.Message):
     uint_value: int
     float_value: float
     string_value: str
-    def __init__(self, bool_value: bool = ..., int_value: _Optional[int] = ..., uint_value: _Optional[int] = ..., float_value: _Optional[float] = ..., string_value: _Optional[str] = ...) -> None: ...
+    def __init__(self, bool_value: _Optional[bool] = ..., int_value: _Optional[int] = ..., uint_value: _Optional[int] = ..., float_value: _Optional[float] = ..., string_value: _Optional[str] = ...) -> None: ...
 
 class ExporterResponse(_message.Message):
     __slots__ = ("success", "reason")
@@ -128,7 +129,7 @@ class ExporterResponse(_message.Message):
     REASON_FIELD_NUMBER: _ClassVar[int]
     success: bool
     reason: str
-    def __init__(self, success: bool = ..., reason: _Optional[str] = ...) -> None: ...
+    def __init__(self, success: _Optional[bool] = ..., reason: _Optional[str] = ...) -> None: ...
 
 class Hello(_message.Message):
     __slots__ = ("version",)
@@ -183,6 +184,52 @@ class GetPlacesResponse(_message.Message):
     PLACES_FIELD_NUMBER: _ClassVar[int]
     places: _containers.RepeatedCompositeFieldContainer[Place]
     def __init__(self, places: _Optional[_Iterable[_Union[Place, _Mapping]]] = ...) -> None: ...
+
+class GetPlaceHistoryRequest(_message.Message):
+    __slots__ = ("placename",)
+    PLACENAME_FIELD_NUMBER: _ClassVar[int]
+    placename: str
+    def __init__(self, placename: _Optional[str] = ...) -> None: ...
+
+class GetPlaceHistoryResponse(_message.Message):
+    __slots__ = ("events",)
+    EVENTS_FIELD_NUMBER: _ClassVar[int]
+    events: _containers.RepeatedCompositeFieldContainer[PlaceHistoryEntry]
+    def __init__(self, events: _Optional[_Iterable[_Union[PlaceHistoryEntry, _Mapping]]] = ...) -> None: ...
+
+class RecordPlaceActivityRequest(_message.Message):
+    __slots__ = ("placename", "action", "status", "duration")
+    PLACENAME_FIELD_NUMBER: _ClassVar[int]
+    ACTION_FIELD_NUMBER: _ClassVar[int]
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    DURATION_FIELD_NUMBER: _ClassVar[int]
+    placename: str
+    action: str
+    status: str
+    duration: float
+    def __init__(self, placename: _Optional[str] = ..., action: _Optional[str] = ..., status: _Optional[str] = ..., duration: _Optional[float] = ...) -> None: ...
+
+class RecordPlaceActivityResponse(_message.Message):
+    __slots__ = ()
+    def __init__(self) -> None: ...
+
+class PlaceHistoryEntry(_message.Message):
+    __slots__ = ("timestamp", "actor", "owner", "action", "status", "duration", "resources")
+    TIMESTAMP_FIELD_NUMBER: _ClassVar[int]
+    ACTOR_FIELD_NUMBER: _ClassVar[int]
+    OWNER_FIELD_NUMBER: _ClassVar[int]
+    ACTION_FIELD_NUMBER: _ClassVar[int]
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    DURATION_FIELD_NUMBER: _ClassVar[int]
+    RESOURCES_FIELD_NUMBER: _ClassVar[int]
+    timestamp: float
+    actor: str
+    owner: str
+    action: str
+    status: str
+    duration: float
+    resources: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(self, timestamp: _Optional[float] = ..., actor: _Optional[str] = ..., owner: _Optional[str] = ..., action: _Optional[str] = ..., status: _Optional[str] = ..., duration: _Optional[float] = ..., resources: _Optional[_Iterable[str]] = ...) -> None: ...
 
 class Place(_message.Message):
     __slots__ = ("name", "aliases", "comment", "tags", "matches", "acquired", "acquired_resources", "allowed", "created", "changed", "reservation")

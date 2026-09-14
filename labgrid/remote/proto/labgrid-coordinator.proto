@@ -13,6 +13,10 @@ service Coordinator {
 
   rpc GetPlaces(GetPlacesRequest) returns (GetPlacesResponse) {}
 
+  rpc GetPlaceHistory(GetPlaceHistoryRequest) returns (GetPlaceHistoryResponse) {}
+
+  rpc RecordPlaceActivity(RecordPlaceActivityRequest) returns (RecordPlaceActivityResponse) {}
+
   rpc AddPlaceAlias(AddPlaceAliasRequest) returns (AddPlaceAliasResponse) {}
 
   rpc DeletePlaceAlias(DeletePlaceAliasRequest) returns (DeletePlaceAliasResponse) {}
@@ -153,6 +157,34 @@ message GetPlacesRequest {
 
 message GetPlacesResponse {
   repeated Place places = 1;
+}
+
+message GetPlaceHistoryRequest {
+  string placename = 1;
+}
+
+message GetPlaceHistoryResponse {
+  repeated PlaceHistoryEntry events = 1;
+}
+
+message RecordPlaceActivityRequest {
+  string placename = 1;
+  string action = 2;
+  string status = 3;
+  double duration = 4;
+}
+
+message RecordPlaceActivityResponse {
+}
+
+message PlaceHistoryEntry {
+  double timestamp = 1;
+  string actor = 2;
+  string owner = 3;
+  string action = 4;
+  string status = 5;
+  double duration = 6;
+  repeated string resources = 7;
 }
 
 message Place {
