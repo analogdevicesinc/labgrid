@@ -1,10 +1,12 @@
 import copy
 import os
+
 import attr
 
 from ..exceptions import InvalidConfigError
 from ..factory import target_factory
-from .common import NetworkResource, ManagedResource, ResourceManager
+from ..step import steps
+from .common import ManagedResource, NetworkResource, ResourceManager
 
 
 def _normalize_ignore(entries, kind):
@@ -247,6 +249,50 @@ class RemotePlace(ManagedResource):
         # populated by RemotePlaceManager once the place is expanded
         self.config_options = {}
         super().__attrs_post_init__()
+
+
+def _record_remote_step(event):
+    """Record top-level driver steps for targets backed by a remote place."""
+    manager = ResourceManager.instances.get(RemotePlaceManager)
+    if manager is None or manager.session is None:
+        return
+
+    session = manager.session
+    activity_depth = getattr(session, "_activity_depth", 0)
+    if isinstance(activity_depth, int) and activity_depth > 0:
+        return
+    step = event.step
+    if step.level != 1:
+        return
+
+    source = step.source
+    target = getattr(source, "target", None)
+    if target is None:
+        return
+    remote_places = [resource for resource in target.resources if isinstance(resource, RemotePlace)]
+    if len(remote_places) != 1:
+        return
+
+    state = event.data.get("state")
+    if state == "start":
+        status = "started"
+        duration = 0.0
+    elif state == "stop":
+        status = "failed" if "exception" in event.data else "succeeded"
+        duration = event.data.get("duration", 0.0)
+    else:
+        return
+
+    try:
+        place = session.get_place(remote_places[0].name)
+        action = f"{source.__class__.__name__}.{step.title}"
+        session._record_activity_sync(place, action, status, duration)
+    except Exception:  # activity reporting must never affect the driver operation
+        manager.logger.debug("failed to record remote step activity", exc_info=True)
+
+
+steps.subscribe(_record_remote_step)
+
 
 @attr.s(eq=False)
 class RemoteUSBResource(NetworkResource, ManagedResource):
