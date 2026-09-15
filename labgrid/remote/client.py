@@ -18,6 +18,9 @@ import shutil
 import json
 import itertools
 import ipaddress
+import time
+import warnings
+from functools import wraps
 from textwrap import indent
 from socket import gethostname, gethostbyname
 from getpass import getuser
@@ -81,6 +84,25 @@ class InteractiveCommandError(Error):
         self.exitcode = exitcode
 
 
+def activity(action):
+    def decorator(func):
+        if asyncio.iscoroutinefunction(func):
+
+            @wraps(func)
+            async def async_wrapper(self, *args, **kwargs):
+                return await self._run_activity(action, func, *args, **kwargs)
+
+            return async_wrapper
+
+        @wraps(func)
+        def sync_wrapper(self, *args, **kwargs):
+            return self._run_activity_sync(action, func, *args, **kwargs)
+
+        return sync_wrapper
+
+    return decorator
+
+
 class ErrorGroup(ExceptionGroup):
     def __str__(self):
         # TODO: drop pylint disable once https://github.com/pylint-dev/pylint/issues/8985 is fixed
@@ -112,8 +134,68 @@ class ClientSession:
     def getuser(self):
         return os.environ.get("LG_USERNAME", getuser())
 
+    def _activity_place(self):
+        try:
+            return self.get_place()
+        except (Error, AttributeError):
+            return None
+
+    async def _record_activity(self, place, action, status, duration=0.0):
+        request = labgrid_coordinator_pb2.RecordPlaceActivityRequest(
+            placename=place.name,
+            action=action,
+            status=status,
+            duration=duration,
+        )
+        try:
+            await self.stub.RecordPlaceActivity(request)
+        except grpc.aio.AioRpcError:
+            logging.debug("failed to record place activity", exc_info=True)
+
+    async def _run_activity(self, action, func, *args, **kwargs):
+        place = self._activity_place()
+        if place is None:
+            return await func(self, *args, **kwargs)
+        started = time.monotonic()
+        await self._record_activity(place, action, "started")
+        self._activity_depth = getattr(self, "_activity_depth", 0) + 1
+        try:
+            result = await func(self, *args, **kwargs)
+        except BaseException:
+            await self._record_activity(place, action, "failed", time.monotonic() - started)
+            raise
+        else:
+            await self._record_activity(place, action, "succeeded", time.monotonic() - started)
+        finally:
+            self._activity_depth -= 1
+        return result
+
+    def _record_activity_sync(self, place, action, status, duration=0.0):
+        if self.loop.is_running():
+            return
+        self.loop.run_until_complete(self._record_activity(place, action, status, duration))
+
+    def _run_activity_sync(self, action, func, *args, **kwargs):
+        place = self._activity_place()
+        if place is None:
+            return func(self, *args, **kwargs)
+        started = time.monotonic()
+        self._record_activity_sync(place, action, "started")
+        self._activity_depth = getattr(self, "_activity_depth", 0) + 1
+        try:
+            result = func(self, *args, **kwargs)
+        except BaseException:
+            self._record_activity_sync(place, action, "failed", time.monotonic() - started)
+            raise
+        else:
+            self._record_activity_sync(place, action, "succeeded", time.monotonic() - started)
+        finally:
+            self._activity_depth -= 1
+        return result
+
     def __attrs_post_init__(self):
         """Actions which are executed if a connection is successfully opened."""
+        self._activity_depth = 0
         self.stopping = asyncio.Event()
 
         # It seems since https://github.com/grpc/grpc/pull/34647, the
@@ -572,6 +654,27 @@ class ClientSession:
                         print(f"Matching resource '{name}' ({exporter}/{group_name}/{resource.cls}/{resource_name}):")  # pylint: disable=line-too-long
                         print(indent(pformat(resource.asdict()), prefix="  "))
 
+    async def print_history(self):
+        place = self.get_place()
+        try:
+            response = await self.stub.GetPlaceHistory(
+                labgrid_coordinator_pb2.GetPlaceHistoryRequest(placename=place.name)
+            )
+        except grpc.aio.AioRpcError as e:
+            raise ServerError(e.details()) from e
+
+        print(f"History for place '{place.name}':")
+        for event in response.events:
+            timestamp = datetime.fromtimestamp(event.timestamp).strftime("%Y-%m-%d %H:%M:%S")
+            line = f"{timestamp}  {event.action:<12} {event.status:<9} {event.actor}"
+            if event.owner and event.owner != event.actor:
+                line += f" owner={event.owner}"
+            if event.duration:
+                line += f" duration={event.duration:.1f}s"
+            if event.resources:
+                line += f" resources={','.join(event.resources)}"
+            print(line)
+
     async def add_place(self):
         """Add a place to the coordinator"""
         name = self.args.place
@@ -949,6 +1052,7 @@ class ClientSession:
                 target.activate(drv)
             return drv
 
+    @activity("power")
     def power(self):
         place = self.get_acquired_place()
         action = self.args.action
@@ -992,6 +1096,7 @@ class ClientSession:
         if action == "get":
             print(f"power{' ' + name if name else ''} for place {place.name} is {'on' if res else 'off'}")
 
+    @activity("io")
     def digital_io(self):
         place = self.get_acquired_place()
         action = self.args.action
@@ -1120,6 +1225,7 @@ class ClientSession:
             print("connection lost", file=sys.stderr)
         return p.returncode
 
+    @activity("console")
     async def console(self, place, target):
         while True:
             res = await self._console(
@@ -1136,6 +1242,7 @@ class ClientSession:
 
     console.needs_target = True
 
+    @activity("dfu")
     def dfu(self):
         place = self.get_acquired_place()
         target = self._get_target(place)
@@ -1153,6 +1260,7 @@ class ClientSession:
         if self.args.action == "list":
             drv.list()
 
+    @activity("fastboot")
     def fastboot(self):
         place = self.get_acquired_place()
         args = self.args.fastboot_args
@@ -1179,6 +1287,7 @@ class ClientSession:
         except subprocess.CalledProcessError as e:
             raise UserError(str(e))
 
+    @activity("flashscript")
     def flashscript(self):
         place = self.get_acquired_place()
         target = self._get_target(place)
@@ -1187,6 +1296,7 @@ class ClientSession:
         drv = self._get_driver_or_new(target, "FlashScriptDriver", name=name)
         drv.flash(script=self.args.script, args=self.args.script_args)
 
+    @activity("bootstrap")
     def bootstrap(self):
         place = self.get_acquired_place()
         target = self._get_target(place)
@@ -1230,6 +1340,7 @@ class ClientSession:
         target.activate(drv)
         drv.load(self.args.filename)
 
+    @activity("sd-mux")
     def sd_mux(self):
         place = self.get_acquired_place()
         action = self.args.action
@@ -1260,6 +1371,7 @@ class ClientSession:
             except ExecutionError as e:
                 raise UserError(str(e))
 
+    @activity("usb-mux")
     def usb_mux(self):
         place = self.get_acquired_place()
         name = self.args.name
@@ -1327,6 +1439,7 @@ class ClientSession:
             drv = self._get_driver_or_new(target, "SSHDriver", name=resource.name)
             return drv
 
+    @activity("ssh")
     def ssh(self):
         drv = self._get_ssh()
 
@@ -1334,6 +1447,7 @@ class ClientSession:
         if res:
             raise InteractiveCommandError("ssh error", res)
 
+    @activity("scp")
     def scp(self):
         drv = self._get_ssh()
 
@@ -1341,6 +1455,7 @@ class ClientSession:
         if res:
             raise InteractiveCommandError("scp error", res)
 
+    @activity("rsync")
     def rsync(self):
         drv = self._get_ssh()
 
@@ -1348,11 +1463,13 @@ class ClientSession:
         if res:
             raise InteractiveCommandError("rsync error", res)
 
+    @activity("sshfs")
     def sshfs(self):
         drv = self._get_ssh()
 
         drv.sshfs(path=self.args.path, mountpoint=self.args.mountpoint)
 
+    @activity("forward")
     def forward(self):
         if not self.args.local and not self.args.remote:
             print("Nothing to forward", file=sys.stderr)
@@ -1376,6 +1493,7 @@ class ClientSession:
             except KeyboardInterrupt:
                 print("Exiting...")
 
+    @activity("telnet")
     def telnet(self):
         place = self.get_acquired_place()
         ip = self._get_ip(place)
@@ -1386,6 +1504,7 @@ class ClientSession:
         if res:
             raise InteractiveCommandError("telnet error", res)
 
+    @activity("video")
     def video(self):
         place = self.get_acquired_place()
         quality = self.args.quality
@@ -1422,6 +1541,7 @@ class ClientSession:
             if res:
                 raise InteractiveCommandError("gst-launch-1.0 error", res)
 
+    @activity("audio")
     def audio(self):
         place = self.get_acquired_place()
         target = self._get_target(place)
@@ -1431,6 +1551,7 @@ class ClientSession:
         if res:
             raise InteractiveCommandError("gst-launch-1.0 error", res)
 
+    @activity("netns")
     def netns(self):
         place = self.get_acquired_place()
         with self._get_target(place) as target:
@@ -1470,6 +1591,7 @@ class ClientSession:
 
         return self._get_driver_or_new(target, "USBTMCDriver", name=name)
 
+    @activity("tmc command")
     def tmc_command(self):
         drv = self._get_tmc()
         command = " ".join(self.args.command)
@@ -1481,6 +1603,7 @@ class ClientSession:
         else:
             drv.command(command)
 
+    @activity("tmc query")
     def tmc_query(self):
         drv = self._get_tmc()
         query = " ".join(self.args.query)
@@ -1489,6 +1612,7 @@ class ClientSession:
         result = drv.query(query)
         print(result)
 
+    @activity("tmc screen")
     def tmc_screen(self):
         drv = self._get_tmc()
         action = self.args.action
@@ -1501,6 +1625,7 @@ class ClientSession:
             if action == "show":
                 subprocess.call(["xdg-open", filename])
 
+    @activity("tmc channel")
     def tmc_channel(self):
         drv = self._get_tmc()
         channel = self.args.channel
@@ -1515,6 +1640,7 @@ class ClientSession:
         for k, v in sorted(data.items()):
             print(f"{k:<16s} {str(v):<10s}")
 
+    @activity("write-files")
     def write_files(self):
         place = self.get_acquired_place()
         target = self._get_target(place)
@@ -1543,6 +1669,7 @@ class ClientSession:
         except FileNotFoundError as e:
             raise UserError(e)
 
+    @activity("write-image")
     def write_image(self):
         place = self.get_acquired_place()
         target = self._get_target(place)
@@ -2046,6 +2173,9 @@ def get_parser(auto_doc_mode=False) -> "argparse.ArgumentParser | AutoProgramArg
 
     subparser = subparsers.add_parser("show", help="show a place and related resources")
     subparser.set_defaults(func=ClientSession.print_place)
+
+    subparser = subparsers.add_parser("history", help="show place activity history")
+    subparser.set_defaults(func=ClientSession.print_history)
 
     subparser = subparsers.add_parser(
         "create",

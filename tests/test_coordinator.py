@@ -1,3 +1,5 @@
+import time
+
 import pytest
 
 import grpc
@@ -113,12 +115,45 @@ def test_coordinator_place_acquire(coordinator, coordinator_place):
     assert res
 
 
-def test_coordinator_place_acquire_release(coordinator, coordinator_place):
+def test_coordinator_place_acquire_release(coordinator, exporter, coordinator_place):
     stub = coordinator_place
+    res = stub.AddPlaceMatch(
+        labgrid_coordinator_pb2.AddPlaceMatchRequest(
+            placename="test", pattern="testhost/Testport/NetworkSerialPort"
+        )
+    )
+    assert res
+    # The exporter sends its resource updates immediately after connecting, but
+    # the stream processes them asynchronously in the coordinator.
+    time.sleep(0.1)
     res = stub.AcquirePlace(labgrid_coordinator_pb2.AcquirePlaceRequest(placename="test"))
     assert res
     res = stub.ReleasePlace(labgrid_coordinator_pb2.ReleasePlaceRequest(placename="test"))
     assert res
+
+    response = stub.GetPlaceHistory(labgrid_coordinator_pb2.GetPlaceHistoryRequest(placename="test"))
+    release = response.events[-1]
+    assert release.action == "release"
+    assert release.owner == "testclient"
+    assert list(release.resources) == ["testhost/Testport/NetworkSerialPort/NetworkSerialPort"]
+
+
+def test_coordinator_place_history(coordinator, channel_stub):
+    channel_stub.AddPlace(labgrid_coordinator_pb2.AddPlaceRequest(name="history-test"))
+    channel_stub.RecordPlaceActivity(
+        labgrid_coordinator_pb2.RecordPlaceActivityRequest(
+            placename="history-test", action="bootstrap", status="succeeded", duration=1.5
+        )
+    )
+
+    response = channel_stub.GetPlaceHistory(
+        labgrid_coordinator_pb2.GetPlaceHistoryRequest(placename="history-test")
+    )
+
+    assert [event.action for event in response.events] == ["create", "bootstrap"]
+    assert response.events[0].actor == "testclient"
+    assert response.events[1].status == "succeeded"
+    assert response.events[1].duration == pytest.approx(1.5)
 
 
 def test_coordinator_place_add_alias(coordinator, coordinator_place):

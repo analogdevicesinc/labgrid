@@ -1,6 +1,8 @@
 import os
 import re
 import time
+import asyncio
+from types import SimpleNamespace
 
 import pytest
 import pexpect
@@ -76,9 +78,58 @@ def test_connect_timeout(coordinator):
         coordinator.resume_tree()
         pass
 
+def test_activity_records_sync_command():
+    from labgrid.remote.client import ClientSession, activity
+
+    session = object.__new__(ClientSession)
+    session.loop = asyncio.new_event_loop()
+    session._activity_place = lambda: SimpleNamespace(name="test")
+    recorded = []
+
+    async def record(place, action, status, duration=0.0):
+        recorded.append((place.name, action, status, duration))
+
+    session._record_activity = record
+
+    @activity("bootstrap")
+    def command(self):
+        return "done"
+
+    @activity("bootstrap")
+    def failing_command(self):
+        raise RuntimeError("failed")
+
+    try:
+        assert command(session) == "done"
+        assert [entry[:3] for entry in recorded] == [
+            ("test", "bootstrap", "started"),
+            ("test", "bootstrap", "succeeded"),
+        ]
+
+        with pytest.raises(RuntimeError):
+            failing_command(session)
+
+        assert [entry[:3] for entry in recorded[2:]] == [
+            ("test", "bootstrap", "started"),
+            ("test", "bootstrap", "failed"),
+        ]
+    finally:
+        session.loop.close()
+
+
 def test_place_show(place):
     with pexpect.spawn('python -m labgrid.remote.client -p test show') as spawn:
         spawn.expect("Place 'test':")
+        spawn.expect(pexpect.EOF)
+        spawn.close()
+        assert spawn.exitstatus == 0, spawn.before.strip()
+
+
+def test_place_history(place):
+    with pexpect.spawn('python -m labgrid.remote.client -p test history') as spawn:
+        spawn.expect("History for place 'test':")
+        spawn.expect("create")
+        spawn.expect("set-tags")
         spawn.expect(pexpect.EOF)
         spawn.close()
         assert spawn.exitstatus == 0, spawn.before.strip()
