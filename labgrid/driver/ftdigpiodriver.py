@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 """FTDI GPIO driver using a labgrid agent."""
 
-import threading
-
 import attr
 
 from ..factory import target_factory
@@ -12,36 +10,31 @@ from ..step import step
 from ..util.agentwrapper import AgentWrapper
 from .common import Driver
 
+# Pins on one interface must share the agent's whole-bus direction state.
 _shared_agents = {}
-_shared_lock = threading.Lock()
 
 
 def _acquire_agent(host, busnum, devnum, interface):
     key = (host, busnum, devnum, interface)
-    with _shared_lock:
-        entry = _shared_agents.get(key)
-        if entry is None:
-            wrapper = AgentWrapper(host)
-            proxy = wrapper.load("ftdigpio")
-            entry = {"wrapper": wrapper, "proxy": proxy, "refs": 0}
-            _shared_agents[key] = entry
-        entry["refs"] += 1
-        return entry["proxy"]
+    entry = _shared_agents.get(key)
+    if entry is None:
+        wrapper = AgentWrapper(host)
+        proxy = wrapper.load("ftdigpio")
+        entry = {"wrapper": wrapper, "proxy": proxy, "refs": 0}
+        _shared_agents[key] = entry
+    entry["refs"] += 1
+    return entry["proxy"]
 
 
 def _release_agent(host, busnum, devnum, interface):
     key = (host, busnum, devnum, interface)
-    with _shared_lock:
-        entry = _shared_agents.get(key)
-        if entry is None:
-            return
-        entry["refs"] -= 1
-        if entry["refs"] <= 0:
-            del _shared_agents[key]
-            try:
-                entry["proxy"].close(busnum, devnum, interface)
-            finally:
-                entry["wrapper"].close()
+    entry = _shared_agents.get(key)
+    if entry is None:
+        return
+    entry["refs"] -= 1
+    if entry["refs"] <= 0:
+        del _shared_agents[key]
+        entry["wrapper"].close()
 
 
 @target_factory.reg_driver

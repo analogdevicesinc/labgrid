@@ -2,7 +2,7 @@
 """Agent for controlling FTDI data-bus GPIOs via bit-bang mode.
 """
 
-import threading
+from contextlib import contextmanager
 
 import usb.core
 import usb.util
@@ -21,20 +21,13 @@ SUPPORTED_DEVICES = {
     0x6014: 1,  # FT232HL/Q
 }
 
-# Per-interface output direction mask, keyed by (busnum, devnum, interface). A
-# set bit marks the corresponding line as an output. Written only by setup() at
-# driver activation; get()/set() read it but never reprograms the bit-mode.
-_directions = {}
-_directions_lock = threading.Lock()
-
 
 class FTDIGPIO:
     def __init__(self, vendor_id, model_id, busnum, devnum, interface):
         self._validate_device(vendor_id, model_id, interface)
         self._interface = interface - 1
         self._index = interface
-        self._key = (busnum, devnum, interface)
-        self._lock = threading.Lock()
+        self._direction = 0
 
         self._dev = self._find_device(vendor_id, model_id, busnum, devnum)
         self._detach_kernel_driver()
@@ -46,7 +39,6 @@ class FTDIGPIO:
             cfg = self._dev.get_active_configuration()
 
         intf = cfg[(self._interface, 0)]
-        usb.util.claim_interface(self._dev, self._interface)
         self._ep_out = usb.util.find_descriptor(
             intf,
             custom_match=lambda ep: usb.util.endpoint_direction(ep.bEndpointAddress) == usb.util.ENDPOINT_OUT,
@@ -54,14 +46,13 @@ class FTDIGPIO:
         if self._ep_out is None:
             raise ValueError("FTDI output endpoint not found")
 
-    def close(self):
+    @contextmanager
+    def _claimed(self):
+        usb.util.claim_interface(self._dev, self._interface)
         try:
-            try:
-                usb.util.release_interface(self._dev, self._interface)
-            except usb.core.USBError:
-                pass
+            yield
         finally:
-            usb.util.dispose_resources(self._dev)
+            usb.util.release_interface(self._dev, self._interface)
 
     def _detach_kernel_driver(self):
         if self._dev.is_kernel_driver_active(self._interface):
@@ -109,26 +100,23 @@ class FTDIGPIO:
         # Update the interface's mask and re-enter async bit-bang mode.
         self._validate_index(index)
         mask = 1 << index
-        with self._lock, _directions_lock:
-            direction = _directions.get(self._key, 0x00)
-            direction = direction | mask if output else direction & ~mask
-            _directions[self._key] = direction
+        direction = self._direction | mask if output else self._direction & ~mask
+        with self._claimed():
             self._set_bitmode(direction, BITMODE_ASYNC_BITBANG)
+        self._direction = direction
 
     def get(self, index):
         self._validate_index(index)
-        with self._lock:
+        with self._claimed():
             value = self._read_gpio_byte()
         return bool(value & (1 << index))
 
     def set(self, index, status):
         self._validate_index(index)
         mask = 1 << index
-        with _directions_lock:
-            is_output = _directions.get(self._key, 0x00) & mask
-        if not is_output:
+        if not self._direction & mask:
             raise ValueError(f"FTDI GPIO line {index} is configured as input, cannot set")
-        with self._lock:
+        with self._claimed():
             output = self._read_gpio_byte()
             if status:
                 output |= mask
@@ -137,42 +125,27 @@ class FTDIGPIO:
             self._write([output])
 
 
-def _run_with_device(vendor_id, model_id, busnum, devnum, interface, callback):
-    device = FTDIGPIO(vendor_id, model_id, busnum, devnum, interface)
-    try:
-        return callback(device)
-    finally:
-        device.close()
+_devices = {}
+
+
+def _get_device(vendor_id, model_id, busnum, devnum, interface):
+    key = (busnum, devnum, interface)
+    if key not in _devices:
+        _devices[key] = FTDIGPIO(vendor_id, model_id, busnum, devnum, interface)
+    return _devices[key]
 
 
 def handle_get(vendor_id, model_id, busnum, devnum, interface, index):
-    return _run_with_device(
-        vendor_id, model_id, busnum, devnum, interface,
-        lambda device: device.get(int(index)),
-    )
+    return _get_device(vendor_id, model_id, busnum, devnum, interface).get(int(index))
 
 
 def handle_set(vendor_id, model_id, busnum, devnum, interface, index, status):
-    _run_with_device(
-        vendor_id, model_id, busnum, devnum, interface,
-        lambda device: device.set(int(index), bool(status)),
-    )
+    _get_device(vendor_id, model_id, busnum, devnum, interface).set(int(index), bool(status))
     return True
 
 
 def handle_setup(vendor_id, model_id, busnum, devnum, interface, index, output):
-    _run_with_device(
-        vendor_id, model_id, busnum, devnum, interface,
-        lambda device: device.setup(int(index), bool(output)),
-    )
-    return True
-
-
-def handle_close(busnum, devnum, interface):
-    # Drop the interface's cached direction mask so the next activation rebuilds
-    # it from config.
-    with _directions_lock:
-        _directions.pop((busnum, devnum, interface), None)
+    _get_device(vendor_id, model_id, busnum, devnum, interface).setup(int(index), bool(output))
     return True
 
 
@@ -180,5 +153,4 @@ methods = {
     "get": handle_get,
     "set": handle_set,
     "setup": handle_setup,
-    "close": handle_close,
 }
