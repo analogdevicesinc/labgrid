@@ -436,6 +436,10 @@ class Target:
         """
         Activate the client by activating all bound suppliers. This may require
         deactivating other clients.
+
+        If activation fails, objects activated as part of this call are
+        deactivated again and restoration of objects active before the call is
+        attempted.
         """
         # don't activate strategies, they usually have conflicting bindings
         if isinstance(client, Strategy):
@@ -446,6 +450,39 @@ class Target:
             client = self._get_driver(cls, name=name, activate=False, active=False)
 
         assert client is not None
+
+        active_before = [
+            bindable
+            for bindable in self.resources + self.drivers
+            if bindable.state is BindingState.active
+        ]
+        activated = []
+        try:
+            self._activate(client, activated)
+        except Exception:
+            for activated_client in reversed(activated):
+                if activated_client.state is not BindingState.active:
+                    continue
+                try:
+                    self.deactivate(activated_client)
+                except Exception:
+                    self.log.exception(
+                        "failed to rollback activation of %s",
+                        activated_client.display_name,
+                    )
+            for bindable in active_before:
+                if bindable.state is not BindingState.bound:
+                    continue
+                try:
+                    self.activate(bindable)
+                except Exception:
+                    self.log.exception(
+                        "failed to restore activation of %s", bindable.display_name
+                    )
+            raise
+
+    def _activate(self, client, activated):
+        """Activate *client* and record newly activated objects."""
 
         if client.state is BindingState.active:
             return  # nothing to do
@@ -465,12 +502,13 @@ class Target:
         # activate recursively and resolve conflicts
         for supplier in client.suppliers:
             if supplier.state is not BindingState.active:
-                self.activate(supplier)
+                self._activate(supplier, activated)
             supplier.resolve_conflicts(client)
 
         # update state
         client.on_activate()
         client.state = BindingState.active
+        activated.append(client)
 
     def deactivate(self, client, name=None):
         """
