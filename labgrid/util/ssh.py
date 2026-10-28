@@ -173,7 +173,13 @@ class SSHConnection:
         else:
             self._start_own_master()
             self._logger.info("Created new SSH connection to %s", self.host)
-        self._start_keepalive()
+        try:
+            self._start_keepalive()
+        except Exception:
+            # don't leave a half-open connection behind, allow a later retry
+            if self._socket:
+                self._stop_own_master()
+            raise
         self._connected = True
 
     def _run_socket_command(self, command, forward=None):
@@ -236,10 +242,10 @@ class SSHConnection:
                 complete_cmd, stdout=subprocess.PIPE, stderr=stderr_pipe,
                 stdin=subprocess.DEVNULL
             )
-        except:
+        except OSError as e:
             raise ExecutionError(
                 f"error executing command: {complete_cmd}"
-            )
+            ) from e
 
         stdout = []
         stderr = []
@@ -453,20 +459,25 @@ class SSHConnection:
         )
 
         try:
-            stdout, stderr = self._master.communicate(timeout=connect_timeout)
-            if self._master.returncode != 0:
+            try:
+                stdout, stderr = self._master.communicate(timeout=connect_timeout)
+                if self._master.returncode != 0:
+                    raise ExecutionError(
+                        f"failed to connect to {self.host} with args {args}, returncode={self._master.returncode} {stdout},{stderr}"  # pylint: disable=line-too-long
+                    )
+            except subprocess.TimeoutExpired:
+                self._master.kill()
+                stdout, stderr = self._master.communicate()
                 raise ExecutionError(
-                    f"failed to connect to {self.host} with args {args}, returncode={self._master.returncode} {stdout},{stderr}"  # pylint: disable=line-too-long
+                    f"failed to connect (timeout) to {self.host} with args {args}, process killed, got {stdout},{stderr}"  # pylint: disable=line-too-long
                 )
-        except subprocess.TimeoutExpired:
-            self._master.kill()
-            stdout, stderr = self._master.communicate()
-            raise ExecutionError(
-                f"failed to connect (timeout) to {self.host} with args {args}, process killed, got {stdout},{stderr}"  # pylint: disable=line-too-long
-            )
 
-        if not os.path.exists(control):
-            raise ExecutionError(f"no control socket to {self.host}")
+            if not os.path.exists(control):
+                raise ExecutionError(f"no control socket to {self.host}")
+        except ExecutionError:
+            # the master is gone, allow a later retry
+            self._master = None
+            raise
 
         self._socket = control
 
@@ -530,17 +541,21 @@ class SSHConnection:
             self._connected = False
 
     def cleanup(self):
-        if self.isconnected():
-            # cancel local forwards
-            for destination, local_port in self._l_forwards.items():
-                self._run_socket_command("cancel", [f"-L{local_port}:{destination}"])
-            self._l_forwards.clear()
-            # cancel remote forwards
-            for forward in self._r_forwards:
-                self._run_socket_command("cancel", [forward])
-            self._r_forwards.clear()
-            self.disconnect()
-        shutil.rmtree(self._tmpdir)
+        try:
+            if self.isconnected():
+                # cancel local forwards
+                for destination, local_port in self._l_forwards.items():
+                    self._run_socket_command("cancel", [f"-L{local_port}:{destination}"])
+                self._l_forwards.clear()
+                # cancel remote forwards
+                for forward in self._r_forwards:
+                    self._run_socket_command("cancel", [forward])
+                self._r_forwards.clear()
+                self.disconnect()
+        finally:
+            # cleanup() may be called more than once (explicitly and via atexit)
+            if os.path.isdir(self._tmpdir):
+                shutil.rmtree(self._tmpdir)
 
 sshmanager = SSHConnectionManager()
 

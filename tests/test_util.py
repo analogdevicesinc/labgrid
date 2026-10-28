@@ -269,6 +269,143 @@ def test_sshmanager_invalid_host_raise():
     with pytest.raises(ExecutionError):
         con.connect()
 
+class FakeSSHProcess:
+    def __init__(self, args, returncode=0, stdout=b"", alive=False):
+        self.args = args
+        self.returncode = None if alive else returncode
+        self._stdout = stdout
+
+    def communicate(self, input=None, timeout=None):
+        return (self._stdout, b"")
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def poll(self):
+        return self.returncode
+
+    def kill(self):
+        self.returncode = -9
+
+
+class FakeSSHSubprocess:
+    """Stand-in for the subprocess module used by labgrid.util.ssh.
+
+    Emulates the ssh processes started by SSHConnection: the check for an
+    external master (fails), the own control master, the keepalive and
+    control socket commands."""
+    PIPE = subprocess.PIPE
+    STDOUT = subprocess.STDOUT
+    DEVNULL = subprocess.DEVNULL
+    TimeoutExpired = subprocess.TimeoutExpired
+    CalledProcessError = subprocess.CalledProcessError
+
+    def __init__(self):
+        self.calls = []
+        self.master_returncode = 0
+        self.keepalive_error = None
+        self.popen_error = None
+
+    def Popen(self, args, **kwargs):
+        self.calls.append(args)
+        if self.popen_error is not None:
+            raise self.popen_error
+        if "-O" in args and "check" in args:
+            # no external master available
+            return FakeSSHProcess(args, returncode=1, stdout=b"No such file or directory")
+        if "-MN" in args:
+            if self.master_returncode == 0:
+                for arg in args:
+                    if arg.startswith("ControlPath="):
+                        open(arg.split("=", 1)[1], "w").close()
+            return FakeSSHProcess(args, returncode=self.master_returncode)
+        if args[-1] == "cat":
+            if self.keepalive_error is not None:
+                raise self.keepalive_error
+            return FakeSSHProcess(args, alive=True)
+        return FakeSSHProcess(args)
+
+    def check_call(self, args, **kwargs):
+        self.calls.append(args)
+        return 0
+
+
+@pytest.fixture
+def fake_ssh_subprocess(monkeypatch):
+    import labgrid.util.ssh as ssh_module
+
+    fake = FakeSSHSubprocess()
+    monkeypatch.setattr(ssh_module, "subprocess", fake)
+    return fake
+
+
+@pytest.fixture
+def fake_connection(fake_ssh_subprocess):
+    con = SSHConnection("fakehost")
+    # don't try to clean up with the real subprocess module on exit
+    atexit.unregister(con.cleanup)
+    yield con
+    # disconnect and remove the temporary directory
+    con.cleanup()
+
+def test_sshconnection_cleanup_idempotent(fake_connection):
+    assert os.path.isdir(fake_connection._tmpdir)
+    fake_connection.cleanup()
+    assert not os.path.isdir(fake_connection._tmpdir)
+    # a second call (e.g. via atexit) must not raise
+    fake_connection.cleanup()
+
+def test_sshconnection_connect_disconnect_mocked(fake_connection):
+    fake_connection.connect()
+    assert fake_connection.isconnected()
+    assert fake_connection._socket is not None
+    fake_connection.disconnect()
+    assert not fake_connection.isconnected()
+    assert fake_connection._master is None
+    assert fake_connection._keepalive is None
+
+def test_sshconnection_master_failure_allows_retry(fake_connection, fake_ssh_subprocess):
+    fake_ssh_subprocess.master_returncode = 255
+    with pytest.raises(ExecutionError):
+        fake_connection.connect()
+    assert fake_connection._master is None
+    assert not fake_connection._connected
+
+    # a retry must fail the same way, not with an AssertionError
+    with pytest.raises(ExecutionError):
+        fake_connection.connect()
+
+    fake_ssh_subprocess.master_returncode = 0
+    fake_connection.connect()
+    assert fake_connection.isconnected()
+
+def test_sshconnection_keepalive_failure_allows_retry(fake_connection, fake_ssh_subprocess):
+    fake_ssh_subprocess.keepalive_error = OSError("keepalive failed")
+    with pytest.raises(OSError):
+        fake_connection.connect()
+    assert fake_connection._master is None
+    assert fake_connection._socket is None
+    assert not fake_connection._connected
+
+    fake_ssh_subprocess.keepalive_error = None
+    fake_connection.connect()
+    assert fake_connection.isconnected()
+
+def test_sshconnection_run_popen_error(fake_connection, fake_ssh_subprocess):
+    fake_connection.connect()
+
+    fake_ssh_subprocess.popen_error = FileNotFoundError("ssh")
+    with pytest.raises(ExecutionError) as excinfo:
+        fake_connection.run("true")
+    assert isinstance(excinfo.value.__cause__, FileNotFoundError)
+
+    # only OSError must be turned into an ExecutionError
+    fake_ssh_subprocess.popen_error = KeyboardInterrupt()
+    with pytest.raises(KeyboardInterrupt):
+        fake_connection.run("true")
+
+    fake_ssh_subprocess.popen_error = None
+
 def test_proxymanager_no_proxy(target):
     host = 'localhost'
     port = 5000
