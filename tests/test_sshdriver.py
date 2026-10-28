@@ -1,5 +1,6 @@
 import pytest
 import socket
+import subprocess
 
 from labgrid import Environment
 from labgrid.driver import SSHDriver, ExecutionError
@@ -65,6 +66,23 @@ def test_run_check_raise(target, ssh_driver_mocked, mocker):
         res = s.run_check("test")
     res = s.run("test")
     assert res == (['error'], [], 1)
+    target.deactivate(s)
+
+def test_run_timeout(target, ssh_driver_mocked, mocker):
+    s = ssh_driver_mocked
+    target.activate(s)
+    sub = subprocess.Popen.return_value
+    sub.reset_mock()  # forget the calls made while starting the master
+    sub.poll.return_value = None  # keepalive is running
+    sub.communicate.side_effect = subprocess.TimeoutExpired("ssh", 1)
+    with pytest.raises(ExecutionError):
+        s.run("sleep 60", timeout=1)
+    # the ssh child must be killed and reaped and its pipes closed
+    sub.kill.assert_called_once()
+    sub.wait.assert_called_once()
+    sub.stdout.close.assert_called_once()
+    sub.stderr.close.assert_called_once()
+    sub.communicate.side_effect = None
     target.deactivate(s)
 
 def test_default_tools(target):
