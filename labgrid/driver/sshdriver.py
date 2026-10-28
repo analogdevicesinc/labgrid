@@ -159,7 +159,7 @@ class SSHDriver(CommandMixin, Driver, CommandProtocol, FileTransferProtocol):
             os.fchmod(fd, stat.S_IRWXU)
             #with openssh>=8.4 SSH_ASKPASS_REQUIRE can be used to force SSH_ASK_PASS
             #openssh<8.4 requires the DISPLAY var and a detached process with start_new_session=True
-            env = {'SSH_ASKPASS': pass_file, 'DISPLAY':'', 'SSH_ASKPASS_REQUIRE':'force'}
+            env.update({'SSH_ASKPASS': pass_file, 'DISPLAY':'', 'SSH_ASKPASS_REQUIRE':'force'})
             with open(fd, 'w') as f:
                 f.write("#!/bin/sh\necho " + shlex.quote(password))
 

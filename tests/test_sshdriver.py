@@ -168,6 +168,21 @@ def test_master_failure_removes_files(target, ssh_driver_mocked, monkeypatch, tm
         target.activate(s)
     # neither the control directory nor the password file may be left behind
     assert list(tmp_path.iterdir()) == []
+
+def test_password_keeps_environment(target, ssh_driver_mocked, monkeypatch):
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    monkeypatch.setenv("HOME", "/home/test")
+    s = ssh_driver_mocked
+    s.password = "secret"
+    target.activate(s)
+    env = subprocess.Popen.call_args_list[0].kwargs["env"]
+    # SSH_ASKPASS must be set up, but the inherited environment must be kept
+    assert env["SSH_ASKPASS"]
+    assert env["SSH_ASKPASS_REQUIRE"] == "force"
+    assert env["PATH"] == "/usr/bin:/bin"
+    assert env["HOME"] == "/home/test"
+    target.deactivate(s)
+
 def test_default_tools(target):
     NetworkService(target, "service", "1.2.3.4", "root")
     s = SSHDriver(target, "ssh")
