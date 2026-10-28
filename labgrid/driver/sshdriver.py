@@ -104,7 +104,8 @@ class SSHDriver(CommandMixin, Driver, CommandProtocol, FileTransferProtocol):
 
         # Retry start of controlmaster, to allow handle failures such as
         # connection refused during target startup
-        connect_timeout = round(timeout.remaining)
+        # ConnectTimeout=0 would disable the timeout, so use at least one second
+        connect_timeout = max(1, round(timeout.remaining))
         while True:
             try:
                 return self._start_own_master_once(connect_timeout)
@@ -112,11 +113,18 @@ class SSHDriver(CommandMixin, Driver, CommandProtocol, FileTransferProtocol):
                 if timeout.expired:
                     raise Exception("Timeout while waiting for ssh connection") from e
                 time.sleep(0.5)
-                connect_timeout = round(timeout.remaining)
+                connect_timeout = max(1, round(timeout.remaining))
 
     def _start_own_master_once(self, timeout):
-
         self.tmpdir = tempfile.mkdtemp(prefix='lg-ssh-')
+        try:
+            return self._start_own_master_in_tmpdir(timeout)
+        except BaseException:
+            # remove the control directory of the failed attempt
+            shutil.rmtree(self.tmpdir, ignore_errors=True)
+            raise
+
+    def _start_own_master_in_tmpdir(self, timeout):
         control = os.path.join(
             self.tmpdir, f'control-{self.networkservice.address}'
         )
@@ -155,13 +163,14 @@ class SSHDriver(CommandMixin, Driver, CommandProtocol, FileTransferProtocol):
             with open(fd, 'w') as f:
                 f.write("#!/bin/sh\necho " + shlex.quote(password))
 
-        self.process = subprocess.Popen(args, env=env,
-                                        stdout=subprocess.PIPE,
-                                        stderr=subprocess.STDOUT,
-                                        stdin=subprocess.DEVNULL,
-                                        start_new_session=True)
-
+        process = None
         try:
+            process = self.process = subprocess.Popen(args, env=env,
+                                            stdout=subprocess.PIPE,
+                                            stderr=subprocess.STDOUT,
+                                            stdin=subprocess.DEVNULL,
+                                            start_new_session=True)
+
             subprocess_timeout = timeout + 5
             return_value = self.process.wait(timeout=subprocess_timeout)
             if return_value != 0:
@@ -185,12 +194,20 @@ class SSHDriver(CommandMixin, Driver, CommandProtocol, FileTransferProtocol):
                     f"Failed to connect to {self.networkservice.address} with {' '.join(args)}: return code {return_value}",  # pylint: disable=line-too-long
                     stdout=stdout,
                 )
-        except subprocess.TimeoutExpired:
-            raise ExecutionError(
-                f"Subprocess timed out [{subprocess_timeout}s] while executing {args}",
-            )
+        except BaseException as e:
+            # Don't leave the ssh process behind, whatever interrupted the
+            # attempt. It could still connect later and become a master nobody
+            # knows about.
+            if process is not None:
+                process.kill()
+                process.wait()
+            if isinstance(e, subprocess.TimeoutExpired):
+                raise ExecutionError(
+                    f"Subprocess timed out [{subprocess_timeout}s] while executing {args}",
+                ) from e
+            raise
         finally:
-            if self._get_password() is not None and os.path.exists(pass_file):
+            if pass_file and os.path.exists(pass_file):
                 os.remove(pass_file)
 
         if not os.path.exists(control):

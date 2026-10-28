@@ -1,6 +1,7 @@
 import pytest
 import socket
 import subprocess
+import tempfile
 
 from labgrid import Environment
 from labgrid.driver import SSHDriver, ExecutionError
@@ -100,6 +101,73 @@ def test_run_stderr_without_trailing_newline(target, ssh_driver_mocked):
     assert s.run("test") == ([], [], 0)
     target.deactivate(s)
 
+def test_master_retry_cleans_up(target, ssh_driver_mocked, monkeypatch, tmp_path):
+    # let mkdtemp() create the control directories below tmp_path
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    s = ssh_driver_mocked
+    s.connection_timeout = 0.3
+    sub = subprocess.Popen.return_value
+    sub.wait.return_value = 255  # connection refused
+    with pytest.raises(Exception, match="Timeout while waiting for ssh connection"):
+        target.activate(s)
+    # every failed attempt must remove its temporary directory again
+    assert list(tmp_path.glob("lg-ssh-*")) == []
+    # ConnectTimeout must never be rounded down to 0 (unbounded)
+    assert subprocess.Popen.call_count >= 2
+    for call in subprocess.Popen.call_args_list:
+        args = call.args[0]
+        assert "ConnectTimeout=0" not in args
+        assert "ConnectTimeout=1" in args
+
+def test_master_timeout_kills_process(target, ssh_driver_mocked, monkeypatch, tmp_path):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    s = ssh_driver_mocked
+    s.connection_timeout = 0.3
+    sub = subprocess.Popen.return_value
+
+    def wait(timeout=None):
+        # ssh does not return in time, but is gone after kill()
+        if timeout is not None:
+            raise subprocess.TimeoutExpired("ssh", timeout)
+        return -9
+
+    sub.wait.side_effect = wait
+    with pytest.raises(Exception, match="Timeout while waiting for ssh connection"):
+        target.activate(s)
+    # every attempt that timed out must kill its ssh process
+    assert subprocess.Popen.call_count >= 1
+    assert sub.kill.call_count == subprocess.Popen.call_count
+    assert list(tmp_path.glob("lg-ssh-*")) == []
+
+def test_master_interrupt_kills_process(target, ssh_driver_mocked, monkeypatch, tmp_path):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    s = ssh_driver_mocked
+    sub = subprocess.Popen.return_value
+
+    def wait(timeout=None):
+        # the user interrupts while waiting for ssh
+        if timeout is not None:
+            raise KeyboardInterrupt()
+        return -9
+
+    sub.wait.side_effect = wait
+    with pytest.raises(KeyboardInterrupt):
+        target.activate(s)
+    # the ssh process must not be left behind and the interrupt must not be
+    # turned into another exception
+    assert subprocess.Popen.call_count == 1
+    sub.kill.assert_called_once()
+    assert list(tmp_path.glob("lg-ssh-*")) == []
+
+def test_master_failure_removes_files(target, ssh_driver_mocked, monkeypatch, tmp_path):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    s = ssh_driver_mocked
+    s.password = "secret"
+    subprocess.Popen.side_effect = FileNotFoundError("ssh")
+    with pytest.raises(FileNotFoundError):
+        target.activate(s)
+    # neither the control directory nor the password file may be left behind
+    assert list(tmp_path.iterdir()) == []
 def test_default_tools(target):
     NetworkService(target, "service", "1.2.3.4", "root")
     s = SSHDriver(target, "ssh")
