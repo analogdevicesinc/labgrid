@@ -281,6 +281,7 @@ class SSHDriver(CommandMixin, Driver, CommandProtocol, FileTransferProtocol):
                 stderr.pop()
         return (stdout, stderr, sub.returncode)
 
+    @Driver.check_active
     def interact(self, cmd=None):
         assert cmd is None or isinstance(cmd, list)
 
@@ -496,8 +497,10 @@ class SSHDriver(CommandMixin, Driver, CommandProtocol, FileTransferProtocol):
     @cached_property
     def _ssh_version(self):
         version = subprocess.run([self._ssh, "-V"], capture_output=True, text=True)
-        version = re.match(r"^OpenSSH_(\d+)\.(\d+)", version.stderr)
-        return tuple(int(x) for x in version.groups())
+        match = re.match(r"^OpenSSH_(\d+)\.(\d+)", version.stderr)
+        if not match:
+            raise ExecutionError(f"Could not determine OpenSSH version from {version.stderr!r}")
+        return tuple(int(x) for x in match.groups())
 
     def _scp_supports_explicit_sftp_mode(self):
         major, minor = self._ssh_version

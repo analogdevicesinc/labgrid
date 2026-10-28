@@ -4,6 +4,7 @@ import subprocess
 import tempfile
 
 from labgrid import Environment
+from labgrid.binding import StateError
 from labgrid.driver import SSHDriver, ExecutionError
 from labgrid.exceptions import NoResourceFoundError
 from labgrid.resource import NetworkService
@@ -182,6 +183,21 @@ def test_password_keeps_environment(target, ssh_driver_mocked, monkeypatch):
     assert env["PATH"] == "/usr/bin:/bin"
     assert env["HOME"] == "/home/test"
     target.deactivate(s)
+
+def test_interact_requires_active(ssh_driver_mocked):
+    with pytest.raises(StateError):
+        ssh_driver_mocked.interact()
+
+def test_ssh_version(ssh_driver_mocked, mocker):
+    run = mocker.patch("subprocess.run")
+    run.return_value.stderr = "OpenSSH_9.6p1 Ubuntu-3ubuntu13, OpenSSL 3.0.13 30 Jan 2024\n"
+    assert ssh_driver_mocked._ssh_version == (9, 6)
+
+def test_ssh_version_unparseable(ssh_driver_mocked, mocker):
+    run = mocker.patch("subprocess.run")
+    run.return_value.stderr = "ssh: command not found\n"
+    with pytest.raises(ExecutionError):
+        ssh_driver_mocked._ssh_version
 
 def test_default_tools(target):
     NetworkService(target, "service", "1.2.3.4", "root")
