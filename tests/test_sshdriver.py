@@ -85,6 +85,21 @@ def test_run_timeout(target, ssh_driver_mocked, mocker):
     sub.communicate.side_effect = None
     target.deactivate(s)
 
+def test_run_stderr_without_trailing_newline(target, ssh_driver_mocked):
+    s = ssh_driver_mocked
+    target.activate(s)
+    sub = subprocess.Popen.return_value
+    sub.poll.return_value = None  # keepalive is running
+    sub.communicate.return_value = (b"out\n", b"fatal")
+    sub.returncode = 1
+    assert s.run("test") == (["out"], ["fatal"], 1)
+    sub.communicate.return_value = (b"out\n", b"fatal\n")
+    assert s.run("test") == (["out"], ["fatal"], 1)
+    sub.communicate.return_value = (b"", b"")
+    sub.returncode = 0
+    assert s.run("test") == ([], [], 0)
+    target.deactivate(s)
+
 def test_default_tools(target):
     NetworkService(target, "service", "1.2.3.4", "root")
     s = SSHDriver(target, "ssh")

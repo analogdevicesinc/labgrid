@@ -260,7 +260,8 @@ class SSHDriver(CommandMixin, Driver, CommandProtocol, FileTransferProtocol):
             stderr = []
         else:
             stderr = stderr.decode(codec, decodeerrors).split('\n')
-            stderr.pop()
+            if stderr[-1] == '':
+                stderr.pop()
         return (stdout, stderr, sub.returncode)
 
     def interact(self, cmd=None):
