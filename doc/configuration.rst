@@ -1301,6 +1301,128 @@ NetworkUSBTMC
 A :any:`NetworkUSBTMC` resource describes a `USBTMC`_ resource available
 on a remote computer.
 
+M2KDigitalIO
+~~~~~~~~~~~~
+An :any:`M2KDigitalIO` resource describes a single digital I/O pin (DIO0 to
+DIO15) of an Analog Devices ADALM2000 (M2K), identified via USB using udev.
+
+The device is accessed through a labgrid agent on the host the ADALM2000 is
+connected to (the exporter in remote setups). The agent uses the python
+bindings of `libm2k <https://github.com/analogdevicesinc/libm2k>`_, which
+therefore need to be installed on that host, not on the client.
+
+Only the selected pin is touched, so one ADALM2000 wired to several boards can
+be split across multiple places: every pin is its own resource and is acquired
+independently.
+libiio's USB backend allows only a single process per device, so the agent
+prefers the iiod running on the ADALM2000's USB ethernet gadget interface,
+which accepts several clients. For this the gadget interface needs an IPv4
+address on the host (the ADALM2000 hands one out via DHCP) and the device must
+use the first address of that network (``192.168.2.1`` by default). Otherwise
+the agent falls back to the exclusive USB backend. In both cases the device
+serial is verified against the matched USB device. With several ADALM2000s on
+one host, give each a distinct network in its ``config.txt``.
+
+.. code-block:: yaml
+
+   M2KDigitalIO:
+     channel: 0
+     direction: out
+     invert: false
+     match:
+       ID_SERIAL_SHORT: '104473aa00bb00cc'
+
+Arguments:
+  - channel (int, default=0): DIO pin number, from ``0`` to ``15``
+  - direction (str, default="out"): pin direction, either ``in`` or ``out``
+  - invert (bool, default=False): whether to invert the logical pin value
+  - match (dict): key and value pairs for a udev match, see `udev Matching`_
+
+libm2k ships a udev rules file granting access to the device. Without it, a
+rule like the following is needed for non-root users:
+
+.. code-block:: none
+
+   SUBSYSTEM=="usb", ATTRS{idVendor}=="0456", ATTRS{idProduct}=="b672", MODE="0660", GROUP="plugdev"
+
+Used by:
+  - `M2KDigitalIODriver`_
+
+NetworkM2KDigitalIO
+~~~~~~~~~~~~~~~~~~~
+A :any:`NetworkM2KDigitalIO` resource describes an `M2KDigitalIO`_ resource
+available on a remote computer.
+
+M2KPowerSupply
+~~~~~~~~~~~~~~
+An :any:`M2KPowerSupply` resource describes one of the two programmable power
+supply channels of an ADALM2000: channel ``0`` is V+ (0 V to 5 V) and channel
+``1`` is V- (-5 V to 0 V).
+See `M2KDigitalIO`_ for the host requirements.
+
+.. code-block:: yaml
+
+   M2KPowerSupply:
+     channel: 0
+     voltage: 3.3
+     match:
+       ID_SERIAL_SHORT: '104473aa00bb00cc'
+
+Arguments:
+  - channel (int, default=0): supply channel, ``0`` for V+ or ``1`` for V-
+  - voltage (float): output voltage in volts, within the channel's range
+  - match (dict): key and value pairs for a udev match, see `udev Matching`_
+
+Used by:
+  - `M2KPowerSupplyDriver`_
+
+NetworkM2KPowerSupply
+~~~~~~~~~~~~~~~~~~~~~
+A :any:`NetworkM2KPowerSupply` resource describes an `M2KPowerSupply`_
+resource available on a remote computer.
+
+M2KAnalogIn
+~~~~~~~~~~~
+An :any:`M2KAnalogIn` resource describes one of the two differential analog
+inputs of an ADALM2000: channel ``0`` is 1+/1-, channel ``1`` is 2+/2-.
+See `M2KDigitalIO`_ for the host requirements.
+
+The analog inputs need calibration. The calibration state lives on the device,
+so it is only performed if the device reports itself as uncalibrated (typically
+once after power-up): from values stored on the device when the firmware
+provides them, otherwise by an ADC calibration taking about a second when the
+first analog input is set up.
+The sample rate is shared by both channels of a device; configuring a
+different value for the second channel is rejected.
+
+.. code-block:: yaml
+
+   M2KAnalogIn:
+     channel: 0
+     range: high
+     samplerate: 100000
+     samples: 1000
+     match:
+       ID_SERIAL_SHORT: '104473aa00bb00cc'
+
+Arguments:
+  - channel (int, default=0): analog input, ``0`` for 1+/1- or ``1`` for 2+/2-
+  - range (str, default="high"): input range, ``high`` for ±25 V or ``low`` for
+    ±2.5 V with higher resolution
+  - samplerate (int, default=100000): sample rate in Hz, one of 1000, 10000,
+    100000, 1000000, 10000000 or 100000000
+  - samples (int, default=1000): number of samples averaged for a voltage
+    reading
+  - match (dict): key and value pairs for a udev match, see `udev Matching`_
+
+Used by:
+  - `M2KAnalogInDriver`_
+
+NetworkM2KAnalogIn
+~~~~~~~~~~~~~~~~~~
+A :any:`NetworkM2KAnalogIn` resource describes an `M2KAnalogIn`_ resource
+available on a remote computer.
+
 Flashrom
 ~~~~~~~~
 A :any:`Flashrom` resource is used to configure the parameters to a local
@@ -2612,6 +2734,36 @@ Implements:
 Arguments:
   - delay (float, default=2.0): delay in seconds between off and on
 
+M2KPowerSupplyDriver
+~~~~~~~~~~~~~~~~~~~~
+The :any:`M2KPowerSupplyDriver` controls one `M2KPowerSupply`_ or
+`NetworkM2KPowerSupply`_ channel of an ADALM2000 through a labgrid agent
+running libm2k.
+``on`` programs the configured voltage and enables the output, ``off``
+disables it.
+``get`` reads back the output and reports it as on if the measured absolute
+voltage is at least 0.1 V.
+The additional ``set_voltage`` and ``get_voltage`` methods change the setpoint
+without changing the on/off state (so it takes effect immediately if the
+channel is on) and read the measured output voltage.
+
+Binds to:
+  supply:
+    - `M2KPowerSupply`_
+    - `NetworkM2KPowerSupply`_
+
+Implements:
+  - :any:`PowerProtocol`
+  - :any:`ResetProtocol`
+
+.. code-block:: yaml
+
+   M2KPowerSupplyDriver:
+     delay: 2.0
+
+Arguments:
+  - delay (float, default=2.0): delay in seconds between off and on
+
 SiSPMPowerDriver
 ~~~~~~~~~~~~~~~~
 A :any:`SiSPMPowerDriver` controls a `SiSPMPowerPort`_, allowing control of the
@@ -2727,6 +2879,56 @@ Implements:
 .. code-block:: yaml
 
    FTDIGPIODriver: {}
+
+Arguments:
+  - None
+
+M2KDigitalIODriver
+~~~~~~~~~~~~~~~~~~
+The :any:`M2KDigitalIODriver` controls one `M2KDigitalIO`_ or
+`NetworkM2KDigitalIO`_ pin of an ADALM2000 through a labgrid agent running
+libm2k.
+The pin direction is programmed from the resource's ``direction`` option on
+activation; calling ``set`` on a pin configured as ``in`` is rejected.
+Only the pin's raw value is accessed, so other pins and the analog functions of
+the device are left untouched and no calibration is performed.
+
+Binds to:
+  gpio:
+    - `M2KDigitalIO`_
+    - `NetworkM2KDigitalIO`_
+
+Implements:
+  - :any:`DigitalOutputProtocol`
+
+.. code-block:: yaml
+
+   M2KDigitalIODriver: {}
+
+Arguments:
+  - None
+
+M2KAnalogInDriver
+~~~~~~~~~~~~~~~~~
+The :any:`M2KAnalogInDriver` reads one `M2KAnalogIn`_ or `NetworkM2KAnalogIn`_
+channel of an ADALM2000 through a labgrid agent running libm2k.
+``get_voltage`` returns the voltage averaged over the resource's ``samples``,
+``get_samples`` returns a list of individual samples taken at the configured
+sample rate.
+The capture buffer of the device is exclusive, so readings are retried for a
+short while if another client currently holds it.
+
+Binds to:
+  analog:
+    - `M2KAnalogIn`_
+    - `NetworkM2KAnalogIn`_
+
+Implements:
+  - :any:`AnalogInputProtocol`
+
+.. code-block:: yaml
+
+   M2KAnalogInDriver: {}
 
 Arguments:
   - None
