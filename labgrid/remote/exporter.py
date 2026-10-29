@@ -583,6 +583,25 @@ class USBFTDIGPIOExport(USBGenericExport):
 
 
 @attr.s(eq=False)
+class USBM2KExport(USBGenericExport):
+    """ResourceExport for ADALM2000 (M2K) DIO pins, power supply channels and analog inputs"""
+
+    def _get_params(self):
+        """Helper function to return parameters"""
+        params = super()._get_params()
+        for key in M2K_EXPORT_PARAMS[type(self.local).__name__]:
+            params[key] = getattr(self.local, key)
+        return params
+
+
+M2K_EXPORT_PARAMS = {
+    "M2KDigitalIO": ("channel", "direction", "invert"),
+    "M2KPowerSupply": ("channel", "voltage"),
+    "M2KAnalogIn": ("channel", "range", "samplerate", "samples"),
+}
+
+
+@attr.s(eq=False)
 class USBFlashableExport(USBGenericExport):
     """ResourceExport for Flashable USB devices"""
 
@@ -625,6 +644,9 @@ exports["USBPowerPort"] = USBPowerPortExport
 exports["DeditecRelais8"] = USBDeditecRelaisExport
 exports["HIDRelay"] = USBHIDRelayExport
 exports["FTDIGPIO"] = USBFTDIGPIOExport
+exports["M2KDigitalIO"] = USBM2KExport
+exports["M2KPowerSupply"] = USBM2KExport
+exports["M2KAnalogIn"] = USBM2KExport
 exports["USBFlashableDevice"] = USBFlashableExport
 exports["LXAUSBMux"] = USBGenericExport
 
