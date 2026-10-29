@@ -7,6 +7,18 @@ import attr
 
 from ..factory import target_factory
 from .common import ManagedResource, ResourceManager
+from .m2k import (
+    M2K_USB_MODEL_ID,
+    M2K_USB_VENDOR_ID,
+    m2k_analog_channel,
+    m2k_analog_range,
+    m2k_analog_samplerate,
+    m2k_analog_samples,
+    m2k_dio_channel,
+    m2k_supply_channel,
+    m2k_supply_voltage,
+    validate_m2k_supply_voltage,
+)
 from .base import SerialPort, NetworkInterface
 from ..util import Timeout
 
@@ -1036,3 +1048,61 @@ class MatchedSysfsGPIO(USBResource):
             self.index = int(self.read_attr('base')) + self.pin
         else:
             self.index = None
+
+
+@attr.s(eq=False)
+class M2KDevice(USBResource):
+    """Base class for resources on an ADALM2000 (USB ID 0456:b672)."""
+
+    def __attrs_post_init__(self):
+        self.match["DEVTYPE"] = "usb_device"
+        super().__attrs_post_init__()
+
+    def filter_match(self, device):
+        match = (
+            device.properties.get("ID_VENDOR_ID"),
+            device.properties.get("ID_MODEL_ID"),
+        )
+        if match != (M2K_USB_VENDOR_ID, M2K_USB_MODEL_ID):
+            return False
+        return super().filter_match(device)
+
+
+@target_factory.reg_resource
+@attr.s(eq=False)
+class M2KDigitalIO(M2KDevice):
+    """This resource describes a single DIO pin (0..15) of an ADALM2000."""
+
+    channel = m2k_dio_channel()
+    direction = attr.ib(default="out", validator=attr.validators.in_(("in", "out")))
+    invert = attr.ib(default=False, validator=attr.validators.instance_of(bool))
+
+
+@target_factory.reg_resource
+@attr.s(eq=False)
+class M2KPowerSupply(M2KDevice):
+    """This resource describes one power supply channel of an ADALM2000.
+
+    Channel 0 is V+ (0..5 V), channel 1 is V- (-5..0 V).
+    """
+
+    channel = m2k_supply_channel()
+    voltage = m2k_supply_voltage()
+
+    def __attrs_post_init__(self):
+        validate_m2k_supply_voltage(self.channel, self.voltage)
+        super().__attrs_post_init__()
+
+
+@target_factory.reg_resource
+@attr.s(eq=False)
+class M2KAnalogIn(M2KDevice):
+    """This resource describes one differential analog input of an ADALM2000.
+
+    Channel 0 is 1+/1-, channel 1 is 2+/2-.
+    """
+
+    channel = m2k_analog_channel()
+    range = m2k_analog_range()
+    samplerate = m2k_analog_samplerate()
+    samples = m2k_analog_samples()

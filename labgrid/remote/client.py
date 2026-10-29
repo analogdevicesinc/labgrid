@@ -972,7 +972,12 @@ class ClientSession:
         name = self.args.name
         target = self._get_target(place)
         from ..resource.power import NetworkPowerPort, PDUDaemonPort
-        from ..resource.remote import NetworkUSBPowerPort, NetworkSiSPMPowerPort, NetworkSysfsGPIO
+        from ..resource.remote import (
+            NetworkM2KPowerSupply,
+            NetworkUSBPowerPort,
+            NetworkSiSPMPowerPort,
+            NetworkSysfsGPIO,
+        )
         from ..resource import TasmotaPowerPort, NetworkYKUSHPowerPort
 
         drv = None
@@ -997,6 +1002,8 @@ class ClientSession:
                 elif isinstance(resource, NetworkSysfsGPIO):
                     self._get_driver_or_new(target, "GpioDigitalOutputDriver", name=name)
                     drv = self._get_driver_or_new(target, "DigitalOutputPowerDriver", name=name)
+                elif isinstance(resource, NetworkM2KPowerSupply):
+                    drv = self._get_driver_or_new(target, "M2KPowerSupplyDriver", name=name)
                 if drv:
                     break
 
@@ -1025,6 +1032,7 @@ class ClientSession:
             NetworkFTDIGPIO,
             NetworkHIDRelay,
             NetworkLXAIOBusPIO,
+            NetworkM2KDigitalIO,
             NetworkSysfsGPIO,
         )
 
@@ -1054,6 +1062,8 @@ class ClientSession:
                     drv = self._get_driver_or_new(target, "GpioDigitalOutputDriver", name=name)
                 elif isinstance(resource, NetworkFTDIGPIO):
                     drv = self._get_driver_or_new(target, "FTDIGPIODriver", name=name)
+                elif isinstance(resource, NetworkM2KDigitalIO):
+                    drv = self._get_driver_or_new(target, "M2KDigitalIODriver", name=name)
                 elif isinstance(resource, NetworkLXAIOBusPIO):
                     drv = self._get_driver_or_new(target, "LXAIOBusPIODriver", name=name)
                 elif isinstance(resource, NetworkHIDRelay):

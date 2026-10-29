@@ -7,6 +7,16 @@ import attr
 from ..exceptions import NoResourceFoundError
 from ..factory import target_factory
 from .common import NetworkResource, ManagedResource, ResourceManager
+from .m2k import (
+    m2k_analog_channel,
+    m2k_analog_range,
+    m2k_analog_samplerate,
+    m2k_analog_samples,
+    m2k_dio_channel,
+    m2k_supply_channel,
+    m2k_supply_voltage,
+    validate_m2k_supply_voltage,
+)
 
 
 @attr.s(eq=False)
@@ -499,3 +509,46 @@ class RemoteNFSProvider(NetworkResource):
 @attr.s(eq=False)
 class RemoteHTTPProvider(RemoteBaseProvider):
     pass
+
+
+@target_factory.reg_resource
+@attr.s(eq=False)
+class NetworkM2KDigitalIO(RemoteUSBResource):
+    """The NetworkM2KDigitalIO describes a remotely accessible ADALM2000 DIO pin"""
+
+    channel = m2k_dio_channel()
+    direction = attr.ib(default="out", validator=attr.validators.in_(("in", "out")))
+    invert = attr.ib(default=False, validator=attr.validators.instance_of(bool))
+
+    def __attrs_post_init__(self):
+        self.timeout = 10.0
+        super().__attrs_post_init__()
+
+
+@target_factory.reg_resource
+@attr.s(eq=False)
+class NetworkM2KPowerSupply(RemoteUSBResource):
+    """The NetworkM2KPowerSupply describes a remotely accessible ADALM2000 power supply channel"""
+
+    channel = m2k_supply_channel()
+    voltage = m2k_supply_voltage()
+
+    def __attrs_post_init__(self):
+        validate_m2k_supply_voltage(self.channel, self.voltage)
+        self.timeout = 10.0
+        super().__attrs_post_init__()
+
+
+@target_factory.reg_resource
+@attr.s(eq=False)
+class NetworkM2KAnalogIn(RemoteUSBResource):
+    """The NetworkM2KAnalogIn describes a remotely accessible ADALM2000 analog input"""
+
+    channel = m2k_analog_channel()
+    range = m2k_analog_range()
+    samplerate = m2k_analog_samplerate()
+    samples = m2k_analog_samples()
+
+    def __attrs_post_init__(self):
+        self.timeout = 10.0
+        super().__attrs_post_init__()
