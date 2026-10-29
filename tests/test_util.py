@@ -270,13 +270,18 @@ def test_sshmanager_invalid_host_raise():
         con.connect()
 
 class FakeSSHProcess:
-    def __init__(self, args, returncode=0, stdout=b"", alive=False, hang=False):
+    def __init__(self, args, returncode=0, stdout=b"", alive=False, hang=False, error=None):
         self.args = args
         self.returncode = None if alive else returncode
         self._stdout = stdout
         self._hang = hang
+        self._error = error
 
     def communicate(self, input=None, timeout=None):
+        if self._error is not None:
+            # e.g. the user interrupts while waiting for the process
+            error, self._error = self._error, None
+            raise error
         if self._hang and timeout is not None:
             # the process stays in the foreground until it is killed
             raise subprocess.TimeoutExpired(self.args, timeout)
@@ -308,6 +313,7 @@ class FakeSSHSubprocess:
     def __init__(self):
         self.calls = []
         self.master_returncode = 0
+        self.master_error = None
         self.keepalive_error = None
         self.popen_error = None
         self.keepalives = []
@@ -329,6 +335,9 @@ class FakeSSHSubprocess:
             # no external master available
             return FakeSSHProcess(args, returncode=1, stdout=b"No such file or directory")
         if "-MN" in args:
+            if self.master_error is not None:
+                error, self.master_error = self.master_error, None
+                return FakeSSHProcess(args, alive=True, error=error)
             if self.master_returncode == 0:
                 control = self._control_path(args)
                 if os.path.exists(control):
@@ -403,6 +412,17 @@ def test_sshconnection_master_failure_allows_retry(fake_connection, fake_ssh_sub
         fake_connection.connect()
 
     fake_ssh_subprocess.master_returncode = 0
+    fake_connection.connect()
+    assert fake_connection.isconnected()
+
+def test_sshconnection_master_interrupt_allows_retry(fake_connection, fake_ssh_subprocess):
+    # the user interrupts while waiting for the master to connect
+    fake_ssh_subprocess.master_error = KeyboardInterrupt()
+    with pytest.raises(KeyboardInterrupt):
+        fake_connection.connect()
+    assert fake_connection._master is None
+    assert not fake_connection._connected
+
     fake_connection.connect()
     assert fake_connection.isconnected()
 

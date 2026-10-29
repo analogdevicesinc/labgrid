@@ -506,8 +506,12 @@ class SSHConnection:
 
             if not os.path.exists(control):
                 raise ExecutionError(f"no control socket to {self.host}")
-        except ExecutionError:
-            # the master is gone, allow a later retry
+        except BaseException:
+            # Allow a later retry, also when interrupted while waiting for the
+            # master. Don't leave a running process behind in that case.
+            if self._master.poll() is None:
+                self._master.kill()
+                self._master.communicate()
             self._master = None
             raise
 
