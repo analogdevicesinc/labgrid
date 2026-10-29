@@ -80,8 +80,13 @@ class SSHConnectionManager:
         return self.get(host)
 
     def close(self, host):
-        con = self.get(host)
-        con.disconnect()
+        # don't use get() here, it would reconnect a dead connection first
+        con = self._connections.get(host)
+        if con is None:
+            self.logger.debug("No connection to %s to close", host)
+            return
+        if con._connected:
+            con.disconnect()
         self.remove_connection(con)
 
     def request_forward(self, host, dest, port):
@@ -89,7 +94,16 @@ class SSHConnectionManager:
         return con.add_port_forward(dest, port)
 
     def remove_forward(self, host, dest, port):
-        con = self.get(host)
+        # don't use get() here, it would reconnect a dead connection first
+        con = self._connections.get(host)
+        if con is None:
+            raise ForwardError(f"No connection to {host}")
+        if not con.isconnected():
+            # the forward is gone together with the connection
+            self.logger.debug("Connection to %s has died, forward is already gone", host)
+            if con._connected:
+                con.disconnect()
+            return
         con.remove_port_forward(dest, port)
 
     def put_file(self, host, local_file, remote_file):

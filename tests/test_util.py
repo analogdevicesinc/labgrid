@@ -702,6 +702,47 @@ def test_sshmanager_close_all_continues_after_failure(fake_ssh_subprocess, monke
         con_a.cleanup()
         con_b.cleanup()
 
+def test_sshmanager_close_dead_connection(fake_ssh_subprocess):
+    con = sshmanager.get("fakehost")
+    atexit.unregister(con.cleanup)
+    try:
+        # the master was killed and the keepalive died with it
+        fake_ssh_subprocess.keepalives[0].returncode = 255
+        fake_ssh_subprocess.master_dead = True
+
+        sshmanager.close("fakehost")
+        assert not con._connected
+        assert "fakehost" not in sshmanager._connections
+        # closing must not reconnect first, also not for unknown hosts
+        sshmanager.close("unknownhost")
+        assert len([c for c in fake_ssh_subprocess.calls if "-MN" in c]) == 1
+    finally:
+        fake_ssh_subprocess.master_dead = False
+        con.cleanup()
+        sshmanager._connections.pop("fakehost", None)
+
+def test_sshmanager_remove_forward_dead_connection(fake_ssh_subprocess):
+    con = sshmanager.get("fakehost")
+    atexit.unregister(con.cleanup)
+    try:
+        sshmanager.request_forward("fakehost", "localhost", 22)
+        fake_ssh_subprocess.keepalives[0].returncode = 255
+        fake_ssh_subprocess.master_dead = True
+
+        # the forward is gone with the connection, removing it must not
+        # reconnect or raise
+        sshmanager.remove_forward("fakehost", "localhost", 22)
+        assert len([c for c in fake_ssh_subprocess.calls if "-MN" in c]) == 1
+        assert not con._connected
+        assert "fakehost" in sshmanager._connections
+
+        with pytest.raises(ForwardError):
+            sshmanager.remove_forward("unknownhost", "localhost", 22)
+    finally:
+        fake_ssh_subprocess.master_dead = False
+        con.cleanup()
+        sshmanager._connections.pop("fakehost", None)
+
 def test_sshconnection_stale_socket_blocks_master(fake_connection, fake_ssh_subprocess):
     # sanity check of the fake: a leftover socket must make the next master
     # attempt fail like with OpenSSH, so the tests above are meaningful
