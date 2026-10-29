@@ -432,7 +432,7 @@ class SigrokDriver(SigrokCommon):
         args.append("--protocol-decoder-samplenum")
         args.append("-l")
         args.append("4")
-        combined = self._get_sigrok_prefix() + args
+        combined = self.sigrok.wrap_command(self._get_sigrok_prefix() + args)
         output = subprocess.check_output(combined)
         return [
             match.groupdict()
@@ -468,14 +468,14 @@ class SigrokPowerDriver(SigrokCommon, PowerResetMixin, PowerProtocol):
     @step()
     def on(self):
         processwrapper.check_output(
-            self._get_sigrok_prefix() + ["--config", "enabled=yes", "--set"]
+            self.sigrok.wrap_command(self._get_sigrok_prefix() + ["--config", "enabled=yes", "--set"])
         )
 
     @Driver.check_active
     @step()
     def off(self):
         processwrapper.check_output(
-            self._get_sigrok_prefix() + ["--config", "enabled=no", "--set"]
+            self.sigrok.wrap_command(self._get_sigrok_prefix() + ["--config", "enabled=no", "--set"])
         )
 
     @Driver.check_active
@@ -492,7 +492,7 @@ class SigrokPowerDriver(SigrokCommon, PowerResetMixin, PowerProtocol):
             raise ValueError(
                 f"Requested voltage target({value}) is higher than configured maximum ({self.max_voltage})")  # pylint: disable=line-too-long
         processwrapper.check_output(
-            self._get_sigrok_prefix() + ["--config", f"voltage_target={value:f}", "--set"]
+            self.sigrok.wrap_command(self._get_sigrok_prefix() + ["--config", f"voltage_target={value:f}", "--set"])
         )
 
     @Driver.check_active
@@ -502,14 +502,14 @@ class SigrokPowerDriver(SigrokCommon, PowerResetMixin, PowerProtocol):
             raise ValueError(
                 f"Requested current limit ({value}) is higher than configured maximum ({self.max_current})")  # pylint: disable=line-too-long
         processwrapper.check_output(
-            self._get_sigrok_prefix() + ["--config", f"current_limit={value:f}", "--set"]
+            self.sigrok.wrap_command(self._get_sigrok_prefix() + ["--config", f"current_limit={value:f}", "--set"])
         )
 
     @Driver.check_active
     @step(result=True)
     def get(self):
         out = processwrapper.check_output(
-            self._get_sigrok_prefix() + ["--get", "enabled"]
+            self.sigrok.wrap_command(self._get_sigrok_prefix() + ["--get", "enabled"])
         )
         if out == b'true':
             return True
@@ -522,7 +522,7 @@ class SigrokPowerDriver(SigrokCommon, PowerResetMixin, PowerProtocol):
     @step(result=True)
     def measure(self):
         out = processwrapper.check_output(
-            self._get_sigrok_prefix() + ["--show"]
+            self.sigrok.wrap_command(self._get_sigrok_prefix() + ["--show"])
         )
         res = {}
         for line in out.splitlines():
