@@ -13,7 +13,7 @@ import logging
 
 from labgrid.util import diff_dict, flat_dict, filter_dict
 from labgrid.util.helper import get_free_port
-from labgrid.util.ssh import ForwardError, SSHConnection, sshmanager
+from labgrid.util.ssh import ForwardError, SSHConnection, SSHConnectionManager, sshmanager
 from labgrid.util.proxy import proxymanager
 from labgrid.util.managedfile import ManagedFile, ManagedFileError
 from labgrid.driver.exception import ExecutionError
@@ -662,6 +662,45 @@ def test_sshconnection_disconnect_dead_master_live_keepalive(fake_connection, fa
     fake_ssh_subprocess.master_dead = False
     fake_connection.connect()
     assert fake_connection.isconnected()
+
+def test_sshconnection_cleanup_dead_master(fake_connection, fake_ssh_subprocess):
+    fake_connection.connect()
+    fake_connection.add_port_forward("localhost", 22)
+    socket_path = fake_connection._socket
+
+    # the master died, the keepalive is still running, so cancelling the
+    # forwards fails
+    fake_ssh_subprocess.master_dead = True
+    assert fake_connection.isconnected()
+
+    # cleanup() runs at exit and must not raise
+    fake_connection.cleanup()
+    assert not fake_connection._connected
+    assert not os.path.exists(socket_path)
+    assert not os.path.isdir(fake_connection._tmpdir)
+
+def test_sshmanager_close_all_continues_after_failure(fake_ssh_subprocess, monkeypatch):
+    # use a private manager, close_all() on the global one would also close
+    # the real connections of other tests with the fake subprocess module
+    manager = SSHConnectionManager()
+    atexit.unregister(manager.close_all)
+    con_a = manager.get("fakehost")
+    con_b = manager.get("fakehost2")
+    atexit.unregister(con_a.cleanup)
+    atexit.unregister(con_b.cleanup)
+    try:
+        def fail():
+            raise RuntimeError("broken")
+        monkeypatch.setattr(con_a, "disconnect", fail)
+
+        manager.close_all()
+        # the second connection must be closed although the first one failed
+        assert not con_b._connected
+        assert not manager._connections
+    finally:
+        monkeypatch.undo()
+        con_a.cleanup()
+        con_b.cleanup()
 
 def test_sshconnection_stale_socket_blocks_master(fake_connection, fake_ssh_subprocess):
     # sanity check of the fake: a leftover socket must make the next master

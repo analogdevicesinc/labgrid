@@ -103,11 +103,14 @@ class SSHConnectionManager:
     def close_all(self):
         """Close all open connections and remove them from the manager """
         for connection in self._connections.values():
-            if connection._connected:
-                if connection.isconnected():
-                    connection.disconnect()
-                else:
-                    connection._reset_connection()
+            if not connection._connected:
+                continue
+            try:
+                # also handles a dead keepalive or master
+                connection.disconnect()
+            except Exception:
+                # close the remaining connections anyway
+                self.logger.warning("Failed to close connection to %s", connection.host, exc_info=True)
         names = self._connections.copy().keys()
         for name in names:
             self.remove_by_name(name)
@@ -608,19 +611,18 @@ class SSHConnection:
         try:
             if self._connected:
                 if self.isconnected():
-                    # cancel local forwards
-                    for destination, local_port in self._l_forwards.items():
-                        self._run_socket_command("cancel", [f"-L{local_port}:{destination}"])
-                    self._l_forwards.clear()
-                    # cancel remote forwards
-                    for forward in self._r_forwards:
-                        self._run_socket_command("cancel", [forward])
-                    self._r_forwards.clear()
-                    self.disconnect()
-                else:
-                    # The keepalive is gone, so control commands may no longer
-                    # work. Reset the connection and remove its stale socket.
-                    self._reset_connection()
+                    try:
+                        # cancel local forwards
+                        for destination, local_port in self._l_forwards.items():
+                            self._run_socket_command("cancel", [f"-L{local_port}:{destination}"])
+                        # cancel remote forwards
+                        for forward in self._r_forwards:
+                            self._run_socket_command("cancel", [forward])
+                    except (subprocess.SubprocessError, OSError):
+                        # the master has died, the forwards are gone with it
+                        self._logger.debug("Failed to cancel forwards for %s", self.host, exc_info=True)
+                # also handles a dead keepalive or master
+                self.disconnect()
         finally:
             # cleanup() may be called more than once (explicitly and via atexit)
             if os.path.isdir(self._tmpdir):
