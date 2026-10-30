@@ -104,7 +104,8 @@ class SSHDriver(CommandMixin, Driver, CommandProtocol, FileTransferProtocol):
 
         # Retry start of controlmaster, to allow handle failures such as
         # connection refused during target startup
-        connect_timeout = round(timeout.remaining)
+        # ConnectTimeout=0 would disable the timeout, so use at least one second
+        connect_timeout = max(1, round(timeout.remaining))
         while True:
             try:
                 return self._start_own_master_once(connect_timeout)
@@ -112,11 +113,18 @@ class SSHDriver(CommandMixin, Driver, CommandProtocol, FileTransferProtocol):
                 if timeout.expired:
                     raise Exception("Timeout while waiting for ssh connection") from e
                 time.sleep(0.5)
-                connect_timeout = round(timeout.remaining)
+                connect_timeout = max(1, round(timeout.remaining))
 
     def _start_own_master_once(self, timeout):
-
         self.tmpdir = tempfile.mkdtemp(prefix='lg-ssh-')
+        try:
+            return self._start_own_master_in_tmpdir(timeout)
+        except BaseException:
+            # remove the control directory of the failed attempt
+            shutil.rmtree(self.tmpdir, ignore_errors=True)
+            raise
+
+    def _start_own_master_in_tmpdir(self, timeout):
         control = os.path.join(
             self.tmpdir, f'control-{self.networkservice.address}'
         )
@@ -151,17 +159,18 @@ class SSHDriver(CommandMixin, Driver, CommandProtocol, FileTransferProtocol):
             os.fchmod(fd, stat.S_IRWXU)
             #with openssh>=8.4 SSH_ASKPASS_REQUIRE can be used to force SSH_ASK_PASS
             #openssh<8.4 requires the DISPLAY var and a detached process with start_new_session=True
-            env = {'SSH_ASKPASS': pass_file, 'DISPLAY':'', 'SSH_ASKPASS_REQUIRE':'force'}
+            env.update({'SSH_ASKPASS': pass_file, 'DISPLAY':'', 'SSH_ASKPASS_REQUIRE':'force'})
             with open(fd, 'w') as f:
                 f.write("#!/bin/sh\necho " + shlex.quote(password))
 
-        self.process = subprocess.Popen(args, env=env,
-                                        stdout=subprocess.PIPE,
-                                        stderr=subprocess.STDOUT,
-                                        stdin=subprocess.DEVNULL,
-                                        start_new_session=True)
-
+        process = None
         try:
+            process = self.process = subprocess.Popen(args, env=env,
+                                            stdout=subprocess.PIPE,
+                                            stderr=subprocess.STDOUT,
+                                            stdin=subprocess.DEVNULL,
+                                            start_new_session=True)
+
             subprocess_timeout = timeout + 5
             return_value = self.process.wait(timeout=subprocess_timeout)
             if return_value != 0:
@@ -185,12 +194,20 @@ class SSHDriver(CommandMixin, Driver, CommandProtocol, FileTransferProtocol):
                     f"Failed to connect to {self.networkservice.address} with {' '.join(args)}: return code {return_value}",  # pylint: disable=line-too-long
                     stdout=stdout,
                 )
-        except subprocess.TimeoutExpired:
-            raise ExecutionError(
-                f"Subprocess timed out [{subprocess_timeout}s] while executing {args}",
-            )
+        except BaseException as e:
+            # Don't leave the ssh process behind, whatever interrupted the
+            # attempt. It could still connect later and become a master nobody
+            # knows about.
+            if process is not None:
+                process.kill()
+                process.wait()
+            if isinstance(e, subprocess.TimeoutExpired):
+                raise ExecutionError(
+                    f"Subprocess timed out [{subprocess_timeout}s] while executing {args}",
+                ) from e
+            raise
         finally:
-            if self._get_password() is not None and os.path.exists(pass_file):
+            if pass_file and os.path.exists(pass_file):
                 os.remove(pass_file)
 
         if not os.path.exists(control):
@@ -238,7 +255,21 @@ class SSHDriver(CommandMixin, Driver, CommandProtocol, FileTransferProtocol):
                 f"error executing command: {complete_cmd}"
             )
 
-        stdout, stderr = sub.communicate(timeout=timeout)
+        try:
+            stdout, stderr = sub.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as e:
+            sub.kill()
+            # The SSH control master can keep the command's output pipes open
+            # after the client process has been killed. Wait for the client
+            # itself and close the pipes instead of waiting for EOF on them.
+            sub.wait()
+            if sub.stdout is not None:
+                sub.stdout.close()
+            if sub.stderr is not None:
+                sub.stderr.close()
+            raise ExecutionError(
+                f"Timeout of {timeout}s exceeded while executing {cmd}"
+            ) from e
         stdout = stdout.decode(codec, decodeerrors).split('\n')
         if stdout[-1] == '':
             stdout.pop()
@@ -246,9 +277,11 @@ class SSHDriver(CommandMixin, Driver, CommandProtocol, FileTransferProtocol):
             stderr = []
         else:
             stderr = stderr.decode(codec, decodeerrors).split('\n')
-            stderr.pop()
+            if stderr[-1] == '':
+                stderr.pop()
         return (stdout, stderr, sub.returncode)
 
+    @Driver.check_active
     def interact(self, cmd=None):
         assert cmd is None or isinstance(cmd, list)
 
@@ -464,8 +497,10 @@ class SSHDriver(CommandMixin, Driver, CommandProtocol, FileTransferProtocol):
     @cached_property
     def _ssh_version(self):
         version = subprocess.run([self._ssh, "-V"], capture_output=True, text=True)
-        version = re.match(r"^OpenSSH_(\d+)\.(\d+)", version.stderr)
-        return tuple(int(x) for x in version.groups())
+        match = re.match(r"^OpenSSH_(\d+)\.(\d+)", version.stderr)
+        if not match:
+            raise ExecutionError(f"Could not determine OpenSSH version from {version.stderr!r}")
+        return tuple(int(x) for x in match.groups())
 
     def _scp_supports_explicit_sftp_mode(self):
         major, minor = self._ssh_version

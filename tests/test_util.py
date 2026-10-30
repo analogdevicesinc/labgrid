@@ -13,7 +13,7 @@ import logging
 
 from labgrid.util import diff_dict, flat_dict, filter_dict
 from labgrid.util.helper import get_free_port
-from labgrid.util.ssh import ForwardError, SSHConnection, sshmanager
+from labgrid.util.ssh import ForwardError, SSHConnection, SSHConnectionManager, sshmanager
 from labgrid.util.proxy import proxymanager
 from labgrid.util.managedfile import ManagedFile, ManagedFileError
 from labgrid.driver.exception import ExecutionError
@@ -269,6 +269,195 @@ def test_sshmanager_invalid_host_raise():
     with pytest.raises(ExecutionError):
         con.connect()
 
+class FakeSSHProcess:
+    def __init__(self, args, returncode=0, stdout=b"", alive=False, hang=False, error=None):
+        self.args = args
+        self.returncode = None if alive else returncode
+        self._stdout = stdout
+        self._hang = hang
+        self._error = error
+
+    def communicate(self, input=None, timeout=None):
+        if self._error is not None:
+            # e.g. the user interrupts while waiting for the process
+            error, self._error = self._error, None
+            raise error
+        if self._hang and timeout is not None:
+            # the process stays in the foreground until it is killed
+            raise subprocess.TimeoutExpired(self.args, timeout)
+        return (self._stdout, b"")
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def poll(self):
+        return self.returncode
+
+    def kill(self):
+        self.returncode = -9
+
+
+class FakeSSHSubprocess:
+    """Stand-in for the subprocess module used by labgrid.util.ssh.
+
+    Emulates the ssh processes started by SSHConnection: the check for an
+    external master (fails unless external_master is set), the own control
+    master, the keepalive and control socket commands."""
+    PIPE = subprocess.PIPE
+    STDOUT = subprocess.STDOUT
+    DEVNULL = subprocess.DEVNULL
+    TimeoutExpired = subprocess.TimeoutExpired
+    CalledProcessError = subprocess.CalledProcessError
+    SubprocessError = subprocess.SubprocessError
+
+    def __init__(self):
+        self.calls = []
+        self.master_returncode = 0
+        self.master_error = None
+        self.keepalive_error = None
+        self.popen_error = None
+        self.keepalives = []
+        # the master was killed, control commands fail and its socket is stale
+        self.master_dead = False
+        # the user runs a control master, SSHConnection must not start one
+        self.external_master = False
+
+    @staticmethod
+    def _control_path(args):
+        for arg in args:
+            if arg.startswith("ControlPath="):
+                return arg.split("=", 1)[1]
+        return None
+
+    def Popen(self, args, **kwargs):
+        self.calls.append(args)
+        if self.popen_error is not None:
+            raise self.popen_error
+        if "-O" in args and "check" in args:
+            if self.external_master:
+                return FakeSSHProcess(args, returncode=0, stdout=b"Master running")
+            # no external master available
+            return FakeSSHProcess(args, returncode=1, stdout=b"No such file or directory")
+        if "-MN" in args:
+            assert not self.external_master, "own master started although an external one exists"
+            if self.master_error is not None:
+                error, self.master_error = self.master_error, None
+                return FakeSSHProcess(args, alive=True, error=error)
+            if self.master_returncode == 0:
+                control = self._control_path(args)
+                if os.path.exists(control):
+                    # like OpenSSH: "ControlSocket ... already exists,
+                    # disabling multiplexing", the process does not return
+                    return FakeSSHProcess(args, hang=True)
+                open(control, "w").close()
+            return FakeSSHProcess(args, returncode=self.master_returncode)
+        if args[-1] == "cat":
+            if self.keepalive_error is not None:
+                raise self.keepalive_error
+            keepalive = FakeSSHProcess(args, alive=True)
+            self.keepalives.append(keepalive)
+            return keepalive
+        return FakeSSHProcess(args)
+
+    def check_call(self, args, **kwargs):
+        self.calls.append(args)
+        if self.master_dead:
+            raise subprocess.CalledProcessError(255, args)
+        if "-O" in args and "exit" in args:
+            # the master removes its socket when it exits
+            control = self._control_path(args)
+            if control and os.path.exists(control):
+                os.unlink(control)
+        return 0
+
+
+@pytest.fixture
+def fake_ssh_subprocess(monkeypatch):
+    import labgrid.util.ssh as ssh_module
+
+    fake = FakeSSHSubprocess()
+    monkeypatch.setattr(ssh_module, "subprocess", fake)
+    return fake
+
+
+@pytest.fixture
+def fake_connection(fake_ssh_subprocess):
+    con = SSHConnection("fakehost")
+    # don't try to clean up with the real subprocess module on exit
+    atexit.unregister(con.cleanup)
+    yield con
+    # disconnect and remove the temporary directory
+    con.cleanup()
+
+def test_sshconnection_cleanup_idempotent(fake_connection):
+    assert os.path.isdir(fake_connection._tmpdir)
+    fake_connection.cleanup()
+    assert not os.path.isdir(fake_connection._tmpdir)
+    # a second call (e.g. via atexit) must not raise
+    fake_connection.cleanup()
+
+def test_sshconnection_connect_disconnect_mocked(fake_connection):
+    fake_connection.connect()
+    assert fake_connection.isconnected()
+    assert fake_connection._socket is not None
+    fake_connection.disconnect()
+    assert not fake_connection.isconnected()
+    assert fake_connection._master is None
+    assert fake_connection._keepalive is None
+
+def test_sshconnection_master_failure_allows_retry(fake_connection, fake_ssh_subprocess):
+    fake_ssh_subprocess.master_returncode = 255
+    with pytest.raises(ExecutionError):
+        fake_connection.connect()
+    assert fake_connection._master is None
+    assert not fake_connection._connected
+
+    # a retry must fail the same way, not with an AssertionError
+    with pytest.raises(ExecutionError):
+        fake_connection.connect()
+
+    fake_ssh_subprocess.master_returncode = 0
+    fake_connection.connect()
+    assert fake_connection.isconnected()
+
+def test_sshconnection_master_interrupt_allows_retry(fake_connection, fake_ssh_subprocess):
+    # the user interrupts while waiting for the master to connect
+    fake_ssh_subprocess.master_error = KeyboardInterrupt()
+    with pytest.raises(KeyboardInterrupt):
+        fake_connection.connect()
+    assert fake_connection._master is None
+    assert not fake_connection._connected
+
+    fake_connection.connect()
+    assert fake_connection.isconnected()
+
+def test_sshconnection_keepalive_failure_allows_retry(fake_connection, fake_ssh_subprocess):
+    fake_ssh_subprocess.keepalive_error = OSError("keepalive failed")
+    with pytest.raises(OSError):
+        fake_connection.connect()
+    assert fake_connection._master is None
+    assert fake_connection._socket is None
+    assert not fake_connection._connected
+
+    fake_ssh_subprocess.keepalive_error = None
+    fake_connection.connect()
+    assert fake_connection.isconnected()
+
+def test_sshconnection_run_popen_error(fake_connection, fake_ssh_subprocess):
+    fake_connection.connect()
+
+    fake_ssh_subprocess.popen_error = FileNotFoundError("ssh")
+    with pytest.raises(ExecutionError) as excinfo:
+        fake_connection.run("true")
+    assert isinstance(excinfo.value.__cause__, FileNotFoundError)
+
+    # only OSError must be turned into an ExecutionError
+    fake_ssh_subprocess.popen_error = KeyboardInterrupt()
+    with pytest.raises(KeyboardInterrupt):
+        fake_connection.run("true")
+
+    fake_ssh_subprocess.popen_error = None
+
 def test_proxymanager_no_proxy(target):
     host = 'localhost'
     port = 5000
@@ -402,3 +591,224 @@ def test_find_dict():
     assert find_dict(dict_a, "a.a") == {"a.a.a": "a.a.a_val"}
     assert find_dict(dict_a, "a.a.a") == "a.a.a_val"
     assert find_dict(dict_a, "x") == None
+
+
+def test_sshconnection_reconnect_dead_keepalive(fake_connection, fake_ssh_subprocess):
+    fake_connection.connect()
+    assert fake_connection.isconnected()
+    fake_connection.add_port_forward("localhost", 22)
+    assert fake_connection._l_forwards
+
+    # the keepalive process dies, e.g. because of a network outage
+    fake_ssh_subprocess.keepalives[0].returncode = 255
+    assert not fake_connection.isconnected()
+
+    fake_connection.connect()
+    assert fake_connection.isconnected()
+    assert len(fake_ssh_subprocess.keepalives) == 2
+    assert fake_connection._keepalive is fake_ssh_subprocess.keepalives[1]
+    # a new master was started and stale forwards were dropped
+    assert len([c for c in fake_ssh_subprocess.calls if "-MN" in c]) == 2
+    assert not fake_connection._l_forwards
+    assert fake_connection.get_prefix()[0] == "ssh"
+
+def test_sshconnection_disconnect_dead_keepalive(fake_connection, fake_ssh_subprocess):
+    fake_connection.connect()
+    fake_ssh_subprocess.keepalives[0].returncode = 255
+    assert not fake_connection.isconnected()
+
+    # disconnecting must still be possible to tear down the master
+    fake_connection.disconnect()
+    assert not fake_connection._connected
+    assert fake_connection._master is None
+    assert fake_connection._keepalive is None
+
+    with pytest.raises(ExecutionError):
+        fake_connection.disconnect()
+
+def test_sshconnection_disconnect_dead_master(fake_connection, fake_ssh_subprocess):
+    fake_connection.connect()
+    fake_connection.add_port_forward("localhost", 22)
+    socket_path = fake_connection._socket
+
+    # the master was killed (e.g. by the OOM killer), the keepalive dies with
+    # it and the control socket is left behind
+    fake_ssh_subprocess.keepalives[0].returncode = 255
+    fake_ssh_subprocess.master_dead = True
+    assert not fake_connection.isconnected()
+
+    # disconnecting must not raise and must remove the stale socket
+    fake_connection.disconnect()
+    assert not fake_connection._connected
+    assert fake_connection._master is None
+    assert fake_connection._keepalive is None
+    assert not fake_connection._l_forwards
+    assert not os.path.exists(socket_path)
+
+    # a new master can be started right away
+    fake_ssh_subprocess.master_dead = False
+    fake_connection.connect()
+    assert fake_connection.isconnected()
+    assert len([c for c in fake_ssh_subprocess.calls if "-MN" in c]) == 2
+
+def test_sshconnection_disconnect_dead_master_live_keepalive(fake_connection, fake_ssh_subprocess):
+    fake_connection.connect()
+    socket_path = fake_connection._socket
+
+    # the master died, but the keepalive did not notice yet
+    fake_ssh_subprocess.master_dead = True
+    assert fake_connection.isconnected()
+
+    fake_connection.disconnect()
+    assert not fake_connection._connected
+    assert fake_connection._master is None
+    assert not os.path.exists(socket_path)
+
+    fake_ssh_subprocess.master_dead = False
+    fake_connection.connect()
+    assert fake_connection.isconnected()
+
+def test_sshconnection_cleanup_dead_master(fake_connection, fake_ssh_subprocess):
+    fake_connection.connect()
+    fake_connection.add_port_forward("localhost", 22)
+    socket_path = fake_connection._socket
+
+    # the master died, the keepalive is still running, so cancelling the
+    # forwards fails
+    fake_ssh_subprocess.master_dead = True
+    assert fake_connection.isconnected()
+
+    # cleanup() runs at exit and must not raise
+    fake_connection.cleanup()
+    assert not fake_connection._connected
+    assert not os.path.exists(socket_path)
+    assert not os.path.isdir(fake_connection._tmpdir)
+
+def test_sshmanager_close_all_continues_after_failure(fake_ssh_subprocess, monkeypatch):
+    # use a private manager, close_all() on the global one would also close
+    # the real connections of other tests with the fake subprocess module
+    manager = SSHConnectionManager()
+    atexit.unregister(manager.close_all)
+    con_a = manager.get("fakehost")
+    con_b = manager.get("fakehost2")
+    atexit.unregister(con_a.cleanup)
+    atexit.unregister(con_b.cleanup)
+    try:
+        def fail():
+            raise RuntimeError("broken")
+        monkeypatch.setattr(con_a, "disconnect", fail)
+
+        manager.close_all()
+        # the second connection must be closed although the first one failed
+        assert not con_b._connected
+        assert not manager._connections
+    finally:
+        monkeypatch.undo()
+        con_a.cleanup()
+        con_b.cleanup()
+
+def test_sshmanager_close_dead_connection(fake_ssh_subprocess):
+    con = sshmanager.get("fakehost")
+    atexit.unregister(con.cleanup)
+    try:
+        # the master was killed and the keepalive died with it
+        fake_ssh_subprocess.keepalives[0].returncode = 255
+        fake_ssh_subprocess.master_dead = True
+
+        sshmanager.close("fakehost")
+        assert not con._connected
+        assert "fakehost" not in sshmanager._connections
+        # closing must not reconnect first, also not for unknown hosts
+        sshmanager.close("unknownhost")
+        assert len([c for c in fake_ssh_subprocess.calls if "-MN" in c]) == 1
+    finally:
+        fake_ssh_subprocess.master_dead = False
+        con.cleanup()
+        sshmanager._connections.pop("fakehost", None)
+
+def test_sshmanager_remove_forward_dead_connection(fake_ssh_subprocess):
+    con = sshmanager.get("fakehost")
+    atexit.unregister(con.cleanup)
+    try:
+        sshmanager.request_forward("fakehost", "localhost", 22)
+        fake_ssh_subprocess.keepalives[0].returncode = 255
+        fake_ssh_subprocess.master_dead = True
+
+        # the forward is gone with the connection, removing it must not
+        # reconnect or raise
+        sshmanager.remove_forward("fakehost", "localhost", 22)
+        assert len([c for c in fake_ssh_subprocess.calls if "-MN" in c]) == 1
+        assert not con._connected
+        assert "fakehost" in sshmanager._connections
+
+        with pytest.raises(ForwardError):
+            sshmanager.remove_forward("unknownhost", "localhost", 22)
+    finally:
+        fake_ssh_subprocess.master_dead = False
+        con.cleanup()
+        sshmanager._connections.pop("fakehost", None)
+
+def _cancelled_forwards(fake_ssh_subprocess):
+    return [c[c.index("cancel") + 1] for c in fake_ssh_subprocess.calls if "-O" in c and "cancel" in c]
+
+def test_sshconnection_external_master_disconnect_cancels_forwards(fake_connection, fake_ssh_subprocess):
+    fake_ssh_subprocess.external_master = True
+    fake_connection.connect()
+    assert fake_connection._socket is None
+    local_port = fake_connection.add_port_forward("localhost", 22)
+    fake_connection.add_remote_port_forward(2222, 22)
+
+    # the external master stays alive after the disconnect, so the forwards
+    # must be cancelled explicitly instead of only being forgotten
+    fake_connection.disconnect()
+    assert _cancelled_forwards(fake_ssh_subprocess) == [
+        f"-L{local_port}:localhost:22",
+        "-R*:2222:localhost:22",
+    ]
+    assert not fake_connection._l_forwards
+    assert not fake_connection._r_forwards
+
+    # after reconnecting the forward is requested from the master again
+    fake_connection.connect()
+    fake_connection.add_port_forward("localhost", 22)
+    assert len([c for c in fake_ssh_subprocess.calls if "forward" in c]) == 3
+
+def test_sshmanager_remove_forward_external_master_dead_keepalive(fake_ssh_subprocess):
+    fake_ssh_subprocess.external_master = True
+    manager = SSHConnectionManager()
+    atexit.unregister(manager.close_all)
+    local_port = manager.request_forward("fakehost", "localhost", 22)
+    con = manager._connections["fakehost"]
+    atexit.unregister(con.cleanup)
+    try:
+        # only the keepalive died, the external master and its forward live on
+        fake_ssh_subprocess.keepalives[0].returncode = 255
+        manager.remove_forward("fakehost", "localhost", 22)
+        assert _cancelled_forwards(fake_ssh_subprocess) == [f"-L{local_port}:localhost:22"]
+        assert not con._connected
+        assert not con._l_forwards
+    finally:
+        con.cleanup()
+
+def test_sshconnection_stale_socket_blocks_master(fake_connection, fake_ssh_subprocess):
+    # sanity check of the fake: a leftover socket must make the next master
+    # attempt fail like with OpenSSH, so the tests above are meaningful
+    open(os.path.join(fake_connection._tmpdir, "control-fakehost"), "w").close()
+    with pytest.raises(ExecutionError, match="timeout"):
+        fake_connection.connect()
+
+def test_sshmanager_get_reconnects_dead_keepalive(fake_ssh_subprocess):
+    con = sshmanager.get("fakehost")
+    atexit.unregister(con.cleanup)
+    try:
+        assert con.isconnected()
+        fake_ssh_subprocess.keepalives[0].returncode = 255
+        assert not con.isconnected()
+
+        assert sshmanager.get("fakehost") is con
+        assert con.isconnected()
+        assert len(fake_ssh_subprocess.keepalives) == 2
+    finally:
+        con.cleanup()
+        sshmanager.remove_by_name("fakehost")
+

@@ -1,4 +1,5 @@
 import atexit
+import contextlib
 import tempfile
 import logging
 import shutil
@@ -49,6 +50,9 @@ class SSHConnectionManager:
             instance = SSHConnection(host)
             instance.connect()
             self._connections[host] = instance
+        elif not instance.isconnected():
+            # e.g. the keepalive died, try to reconnect
+            instance.connect()
         return instance
 
     def add_connection(self, connection):
@@ -76,8 +80,13 @@ class SSHConnectionManager:
         return self.get(host)
 
     def close(self, host):
-        con = self.get(host)
-        con.disconnect()
+        # don't use get() here, it would reconnect a dead connection first
+        con = self._connections.get(host)
+        if con is None:
+            self.logger.debug("No connection to %s to close", host)
+            return
+        if con._connected:
+            con.disconnect()
         self.remove_connection(con)
 
     def request_forward(self, host, dest, port):
@@ -85,7 +94,16 @@ class SSHConnectionManager:
         return con.add_port_forward(dest, port)
 
     def remove_forward(self, host, dest, port):
-        con = self.get(host)
+        # don't use get() here, it would reconnect a dead connection first
+        con = self._connections.get(host)
+        if con is None:
+            raise ForwardError(f"No connection to {host}")
+        if not con.isconnected():
+            # the forward is gone together with the connection
+            self.logger.debug("Connection to %s has died, forward is already gone", host)
+            if con._connected:
+                con.disconnect()
+            return
         con.remove_port_forward(dest, port)
 
     def put_file(self, host, local_file, remote_file):
@@ -98,9 +116,15 @@ class SSHConnectionManager:
 
     def close_all(self):
         """Close all open connections and remove them from the manager """
-        for name, connection in self._connections.items():
-            if connection.isconnected():
+        for connection in self._connections.values():
+            if not connection._connected:
+                continue
+            try:
+                # also handles a dead keepalive or master
                 connection.disconnect()
+            except Exception:
+                # close the remaining connections anyway
+                self.logger.warning("Failed to close connection to %s", connection.host, exc_info=True)
         names = self._connections.copy().keys()
         for name in names:
             self.remove_by_name(name)
@@ -173,7 +197,13 @@ class SSHConnection:
         else:
             self._start_own_master()
             self._logger.info("Created new SSH connection to %s", self.host)
-        self._start_keepalive()
+        try:
+            self._start_keepalive()
+        except Exception:
+            # don't leave a half-open connection behind, allow a later retry
+            if self._socket:
+                self._stop_own_master()
+            raise
         self._connected = True
 
     def _run_socket_command(self, command, forward=None):
@@ -236,10 +266,10 @@ class SSHConnection:
                 complete_cmd, stdout=subprocess.PIPE, stderr=stderr_pipe,
                 stdin=subprocess.DEVNULL
             )
-        except:
+        except OSError as e:
             raise ExecutionError(
                 f"error executing command: {complete_cmd}"
-            )
+            ) from e
 
         stdout = []
         stderr = []
@@ -395,9 +425,54 @@ class SSHConnection:
         self._r_forwards.remove(forward)
         self._run_socket_command("cancel", [forward])
 
+    def _cancel_forwards(self):
+        """Cancel all forwards of this connection on the master.
+
+        Our own master takes its forwards with it when it exits, but an
+        external master stays alive after a disconnect and would keep them
+        open. Errors are only logged, the master may have died already."""
+        try:
+            for destination, local_port in self._l_forwards.items():
+                self._run_socket_command("cancel", [f"-L{local_port}:{destination}"])
+            for forward in self._r_forwards:
+                self._run_socket_command("cancel", [forward])
+        except (subprocess.SubprocessError, OSError):
+            self._logger.debug("Failed to cancel forwards for %s", self.host, exc_info=True)
+        finally:
+            self._l_forwards.clear()
+            self._r_forwards.clear()
+
     def connect(self):
+        if self._connected and not self._check_keepalive():
+            self._logger.warning("Keepalive for %s has died, reconnecting", self.host)
+            self._reset_connection()
         if not self._connected:
             self._open_connection()
+
+    def _reset_connection(self):
+        """Tear down the remains of a connection whose keepalive has died."""
+        socket_path = self._socket
+        try:
+            if not self._socket:
+                # an external master may still be alive, remove our forwards
+                self._cancel_forwards()
+            if self._keepalive is not None:
+                self._stop_keepalive()
+            if self._socket and self._master is not None:
+                try:
+                    self._stop_own_master()
+                except (subprocess.SubprocessError, OSError):
+                    # the master is most likely gone as well
+                    self._logger.debug("Failed to stop own master for %s", self.host, exc_info=True)
+        finally:
+            if socket_path:
+                try:
+                    os.unlink(socket_path)
+                except FileNotFoundError:
+                    pass
+            self._l_forwards.clear()
+            self._r_forwards.clear()
+            self._connected = False
 
     def isconnected(self):
         return self._connected and self._check_keepalive()
@@ -453,20 +528,29 @@ class SSHConnection:
         )
 
         try:
-            stdout, stderr = self._master.communicate(timeout=connect_timeout)
-            if self._master.returncode != 0:
+            try:
+                stdout, stderr = self._master.communicate(timeout=connect_timeout)
+                if self._master.returncode != 0:
+                    raise ExecutionError(
+                        f"failed to connect to {self.host} with args {args}, returncode={self._master.returncode} {stdout},{stderr}"  # pylint: disable=line-too-long
+                    )
+            except subprocess.TimeoutExpired:
+                self._master.kill()
+                stdout, stderr = self._master.communicate()
                 raise ExecutionError(
-                    f"failed to connect to {self.host} with args {args}, returncode={self._master.returncode} {stdout},{stderr}"  # pylint: disable=line-too-long
+                    f"failed to connect (timeout) to {self.host} with args {args}, process killed, got {stdout},{stderr}"  # pylint: disable=line-too-long
                 )
-        except subprocess.TimeoutExpired:
-            self._master.kill()
-            stdout, stderr = self._master.communicate()
-            raise ExecutionError(
-                f"failed to connect (timeout) to {self.host} with args {args}, process killed, got {stdout},{stderr}"  # pylint: disable=line-too-long
-            )
 
-        if not os.path.exists(control):
-            raise ExecutionError(f"no control socket to {self.host}")
+            if not os.path.exists(control):
+                raise ExecutionError(f"no control socket to {self.host}")
+        except BaseException:
+            # Allow a later retry, also when interrupted while waiting for the
+            # master. Don't leave a running process behind in that case.
+            if self._master.poll() is None:
+                self._master.kill()
+                self._master.communicate()
+            self._master = None
+            raise
 
         self._socket = control
 
@@ -477,8 +561,16 @@ class SSHConnection:
         assert self._master is not None
 
         try:
-            self._run_socket_command("cancel")
-            self._run_socket_command("exit")
+            try:
+                self._run_socket_command("cancel")
+                self._run_socket_command("exit")
+            except (subprocess.SubprocessError, OSError):
+                # The master can not be reached anymore, so it has most likely
+                # died. Remove its stale socket, otherwise ssh refuses to start
+                # a new master with the same ControlPath.
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(self._socket)
+                raise
             # if the master doesn't terminate in less than 60 seconds,
             # something is very wrong
             self._master.communicate(timeout=60)
@@ -517,30 +609,45 @@ class SSHConnection:
         finally:
             self._keepalive = None
 
-    @_check_connected
     def disconnect(self):
-        assert self._connected
+        """Stop the keepalive and the own control master.
+
+        Disconnecting is also possible when the keepalive or the master has
+        died. The remains of the connection are cleaned up in that case."""
+        # don't use _check_connected here, see above
+        if not self._connected:
+            raise ExecutionError(f"disconnect can not be called ({self} is not connected)")
+        if not self._check_keepalive():
+            # The keepalive has died, so the master is most likely gone as
+            # well and control commands would fail.
+            self._logger.info("Closing SSH connection to %s (keepalive has died)", self.host)
+            self._reset_connection()
+            return
         try:
+            self._cancel_forwards()
             self._stop_keepalive()
 
             if self._socket:
                 self._logger.info("Closing SSH connection to %s", self.host)
-                self._stop_own_master()
+                try:
+                    self._stop_own_master()
+                except (subprocess.SubprocessError, OSError):
+                    # the master died while the keepalive was still running
+                    self._logger.warning(
+                        "Failed to stop own master for %s, it has most likely died", self.host, exc_info=True
+                    )
         finally:
             self._connected = False
 
     def cleanup(self):
-        if self.isconnected():
-            # cancel local forwards
-            for destination, local_port in self._l_forwards.items():
-                self._run_socket_command("cancel", [f"-L{local_port}:{destination}"])
-            self._l_forwards.clear()
-            # cancel remote forwards
-            for forward in self._r_forwards:
-                self._run_socket_command("cancel", [forward])
-            self._r_forwards.clear()
-            self.disconnect()
-        shutil.rmtree(self._tmpdir)
+        try:
+            if self._connected:
+                # cancels the forwards, also handles a dead keepalive or master
+                self.disconnect()
+        finally:
+            # cleanup() may be called more than once (explicitly and via atexit)
+            if os.path.isdir(self._tmpdir):
+                shutil.rmtree(self._tmpdir)
 
 sshmanager = SSHConnectionManager()
 
