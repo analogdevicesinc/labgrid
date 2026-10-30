@@ -425,6 +425,23 @@ class SSHConnection:
         self._r_forwards.remove(forward)
         self._run_socket_command("cancel", [forward])
 
+    def _cancel_forwards(self):
+        """Cancel all forwards of this connection on the master.
+
+        Our own master takes its forwards with it when it exits, but an
+        external master stays alive after a disconnect and would keep them
+        open. Errors are only logged, the master may have died already."""
+        try:
+            for destination, local_port in self._l_forwards.items():
+                self._run_socket_command("cancel", [f"-L{local_port}:{destination}"])
+            for forward in self._r_forwards:
+                self._run_socket_command("cancel", [forward])
+        except (subprocess.SubprocessError, OSError):
+            self._logger.debug("Failed to cancel forwards for %s", self.host, exc_info=True)
+        finally:
+            self._l_forwards.clear()
+            self._r_forwards.clear()
+
     def connect(self):
         if self._connected and not self._check_keepalive():
             self._logger.warning("Keepalive for %s has died, reconnecting", self.host)
@@ -436,6 +453,9 @@ class SSHConnection:
         """Tear down the remains of a connection whose keepalive has died."""
         socket_path = self._socket
         try:
+            if not self._socket:
+                # an external master may still be alive, remove our forwards
+                self._cancel_forwards()
             if self._keepalive is not None:
                 self._stop_keepalive()
             if self._socket and self._master is not None:
@@ -604,6 +624,7 @@ class SSHConnection:
             self._reset_connection()
             return
         try:
+            self._cancel_forwards()
             self._stop_keepalive()
 
             if self._socket:
@@ -616,26 +637,12 @@ class SSHConnection:
                         "Failed to stop own master for %s, it has most likely died", self.host, exc_info=True
                     )
         finally:
-            # the forwards are gone together with the master
-            self._l_forwards.clear()
-            self._r_forwards.clear()
             self._connected = False
 
     def cleanup(self):
         try:
             if self._connected:
-                if self.isconnected():
-                    try:
-                        # cancel local forwards
-                        for destination, local_port in self._l_forwards.items():
-                            self._run_socket_command("cancel", [f"-L{local_port}:{destination}"])
-                        # cancel remote forwards
-                        for forward in self._r_forwards:
-                            self._run_socket_command("cancel", [forward])
-                    except (subprocess.SubprocessError, OSError):
-                        # the master has died, the forwards are gone with it
-                        self._logger.debug("Failed to cancel forwards for %s", self.host, exc_info=True)
-                # also handles a dead keepalive or master
+                # cancels the forwards, also handles a dead keepalive or master
                 self.disconnect()
         finally:
             # cleanup() may be called more than once (explicitly and via atexit)

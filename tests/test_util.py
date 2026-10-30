@@ -301,8 +301,8 @@ class FakeSSHSubprocess:
     """Stand-in for the subprocess module used by labgrid.util.ssh.
 
     Emulates the ssh processes started by SSHConnection: the check for an
-    external master (fails), the own control master, the keepalive and
-    control socket commands."""
+    external master (fails unless external_master is set), the own control
+    master, the keepalive and control socket commands."""
     PIPE = subprocess.PIPE
     STDOUT = subprocess.STDOUT
     DEVNULL = subprocess.DEVNULL
@@ -319,6 +319,8 @@ class FakeSSHSubprocess:
         self.keepalives = []
         # the master was killed, control commands fail and its socket is stale
         self.master_dead = False
+        # the user runs a control master, SSHConnection must not start one
+        self.external_master = False
 
     @staticmethod
     def _control_path(args):
@@ -332,9 +334,12 @@ class FakeSSHSubprocess:
         if self.popen_error is not None:
             raise self.popen_error
         if "-O" in args and "check" in args:
+            if self.external_master:
+                return FakeSSHProcess(args, returncode=0, stdout=b"Master running")
             # no external master available
             return FakeSSHProcess(args, returncode=1, stdout=b"No such file or directory")
         if "-MN" in args:
+            assert not self.external_master, "own master started although an external one exists"
             if self.master_error is not None:
                 error, self.master_error = self.master_error, None
                 return FakeSSHProcess(args, alive=True, error=error)
@@ -742,6 +747,48 @@ def test_sshmanager_remove_forward_dead_connection(fake_ssh_subprocess):
         fake_ssh_subprocess.master_dead = False
         con.cleanup()
         sshmanager._connections.pop("fakehost", None)
+
+def _cancelled_forwards(fake_ssh_subprocess):
+    return [c[c.index("cancel") + 1] for c in fake_ssh_subprocess.calls if "-O" in c and "cancel" in c]
+
+def test_sshconnection_external_master_disconnect_cancels_forwards(fake_connection, fake_ssh_subprocess):
+    fake_ssh_subprocess.external_master = True
+    fake_connection.connect()
+    assert fake_connection._socket is None
+    local_port = fake_connection.add_port_forward("localhost", 22)
+    fake_connection.add_remote_port_forward(2222, 22)
+
+    # the external master stays alive after the disconnect, so the forwards
+    # must be cancelled explicitly instead of only being forgotten
+    fake_connection.disconnect()
+    assert _cancelled_forwards(fake_ssh_subprocess) == [
+        f"-L{local_port}:localhost:22",
+        "-R*:2222:localhost:22",
+    ]
+    assert not fake_connection._l_forwards
+    assert not fake_connection._r_forwards
+
+    # after reconnecting the forward is requested from the master again
+    fake_connection.connect()
+    fake_connection.add_port_forward("localhost", 22)
+    assert len([c for c in fake_ssh_subprocess.calls if "forward" in c]) == 3
+
+def test_sshmanager_remove_forward_external_master_dead_keepalive(fake_ssh_subprocess):
+    fake_ssh_subprocess.external_master = True
+    manager = SSHConnectionManager()
+    atexit.unregister(manager.close_all)
+    local_port = manager.request_forward("fakehost", "localhost", 22)
+    con = manager._connections["fakehost"]
+    atexit.unregister(con.cleanup)
+    try:
+        # only the keepalive died, the external master and its forward live on
+        fake_ssh_subprocess.keepalives[0].returncode = 255
+        manager.remove_forward("fakehost", "localhost", 22)
+        assert _cancelled_forwards(fake_ssh_subprocess) == [f"-L{local_port}:localhost:22"]
+        assert not con._connected
+        assert not con._l_forwards
+    finally:
+        con.cleanup()
 
 def test_sshconnection_stale_socket_blocks_master(fake_connection, fake_ssh_subprocess):
     # sanity check of the fake: a leftover socket must make the next master
