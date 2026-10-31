@@ -1495,6 +1495,11 @@ RemoteUSBADBDevice
 
 A :any:`RemoteUSBADBDevice` describes a `USBADBDevice`_ available on a remote computer.
 
+Arguments:
+ - host (str): hostname of the remote host
+ - serialno (str): The serial number of the device as shown by adb
+ - port (int): The TCP port of the adb server on the remote host
+
 NetworkADBDevice
 ++++++++++++++++
 
