@@ -1015,6 +1015,14 @@ RemoteNetworkInterface
 A :any:`RemoteNetworkInterface` resource describes a `NetworkInterface`_ or
 `USBNetworkInterface`_ resource available on a remote computer.
 
+Arguments:
+  - host (str): hostname of the remote host
+  - ifname (str): name of the interface on the remote host
+
+Used by:
+  - `NetworkInterfaceDriver`_
+  - `RawNetworkInterfaceDriver`_
+
 AlteraUSBBlaster
 ~~~~~~~~~~~~~~~~
 An :any:`AlteraUSBBlaster` resource describes an Altera USB blaster.
