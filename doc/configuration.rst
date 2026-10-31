@@ -398,7 +398,7 @@ The example describes port 1 on the hub with the ID_PATH
 ``platform-1c1a400.usb-usb-0:2``.
 
 Arguments:
-  - index (int): number of the port to switch
+  - index (int, default=0): number of the port to switch
   - match (dict): key and value pairs for a udev match, see `udev Matching`_
 
 Used by:
