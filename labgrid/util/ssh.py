@@ -1,4 +1,5 @@
 import atexit
+import contextlib
 import tempfile
 import logging
 import shutil
@@ -49,6 +50,8 @@ class SSHConnectionManager:
             instance = SSHConnection(host)
             instance.connect()
             self._connections[host] = instance
+        elif not instance.isconnected():
+            instance.connect()
         return instance
 
     def add_connection(self, connection):
@@ -396,8 +399,20 @@ class SSHConnection:
         self._run_socket_command("cancel", [forward])
 
     def connect(self):
+        if self._connected and not self._check_keepalive():
+            self._logger.warning("Keepalive for %s has died, reconnecting", self.host)
+            self._reset_connection()
         if not self._connected:
             self._open_connection()
+
+    def _reset_connection(self):
+        self._stop_keepalive()
+        if self._socket:
+            with contextlib.suppress(subprocess.SubprocessError, OSError):
+                self._stop_own_master()
+        self._l_forwards.clear()
+        self._r_forwards.clear()
+        self._connected = False
 
     def isconnected(self):
         return self._connected and self._check_keepalive()

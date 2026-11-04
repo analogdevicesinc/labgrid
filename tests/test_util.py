@@ -342,6 +342,25 @@ def test_sshconnection_master_failure_allows_retry(fake_connection, fake_ssh_sub
     fake_connection.connect()
     assert fake_connection.isconnected()
 
+def test_sshconnection_reconnect_dead_keepalive(fake_connection, fake_ssh_subprocess):
+    fake_connection.connect()
+    fake_connection.add_port_forward("localhost", 22)
+    fake_ssh_subprocess.keepalives[0].returncode = 255
+    assert not fake_connection.isconnected()
+
+    fake_connection.connect()
+    assert fake_connection.isconnected()
+    assert fake_ssh_subprocess.masters == 2
+    assert not fake_connection._l_forwards
+
+def test_sshmanager_get_reconnects_dead_keepalive(fake_connection, fake_ssh_subprocess, monkeypatch):
+    monkeypatch.setitem(sshmanager._connections, "fakehost", fake_connection)
+    fake_connection.connect()
+    fake_ssh_subprocess.keepalives[0].returncode = 255
+
+    assert sshmanager.get("fakehost") is fake_connection
+    assert fake_connection.isconnected()
+
 def test_proxymanager_no_proxy(target):
     host = 'localhost'
     port = 5000
