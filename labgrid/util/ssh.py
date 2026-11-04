@@ -445,7 +445,7 @@ class SSHConnection:
 
         self._logger.debug("Master Start command: %s", " ".join(args))
         assert self._master is None
-        self._master = subprocess.Popen(
+        master = subprocess.Popen(
             args,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -453,14 +453,14 @@ class SSHConnection:
         )
 
         try:
-            stdout, stderr = self._master.communicate(timeout=connect_timeout)
-            if self._master.returncode != 0:
+            stdout, stderr = master.communicate(timeout=connect_timeout)
+            if master.returncode != 0:
                 raise ExecutionError(
-                    f"failed to connect to {self.host} with args {args}, returncode={self._master.returncode} {stdout},{stderr}"  # pylint: disable=line-too-long
+                    f"failed to connect to {self.host} with args {args}, returncode={master.returncode} {stdout},{stderr}"  # pylint: disable=line-too-long
                 )
         except subprocess.TimeoutExpired:
-            self._master.kill()
-            stdout, stderr = self._master.communicate()
+            master.kill()
+            stdout, stderr = master.communicate()
             raise ExecutionError(
                 f"failed to connect (timeout) to {self.host} with args {args}, process killed, got {stdout},{stderr}"  # pylint: disable=line-too-long
             )
@@ -468,6 +468,7 @@ class SSHConnection:
         if not os.path.exists(control):
             raise ExecutionError(f"no control socket to {self.host}")
 
+        self._master = master
         self._socket = control
 
         self._logger.debug('Connected to %s', self.host)
