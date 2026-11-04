@@ -109,6 +109,7 @@ class SSHDriver(CommandMixin, Driver, CommandProtocol, FileTransferProtocol):
             try:
                 return self._start_own_master_once(connect_timeout)
             except ExecutionError as e:
+                shutil.rmtree(self.tmpdir, ignore_errors=True)
                 if timeout.expired:
                     raise Exception("Timeout while waiting for ssh connection") from e
                 time.sleep(0.5)
@@ -238,7 +239,12 @@ class SSHDriver(CommandMixin, Driver, CommandProtocol, FileTransferProtocol):
                 f"error executing command: {complete_cmd}"
             )
 
-        stdout, stderr = sub.communicate(timeout=timeout)
+        try:
+            stdout, stderr = sub.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as e:
+            sub.kill()
+            sub.wait()
+            raise ExecutionError(f"timeout of {timeout}s exceeded while executing {cmd}") from e
         stdout = stdout.decode(codec, decodeerrors).split('\n')
         if stdout[-1] == '':
             stdout.pop()
@@ -246,7 +252,8 @@ class SSHDriver(CommandMixin, Driver, CommandProtocol, FileTransferProtocol):
             stderr = []
         else:
             stderr = stderr.decode(codec, decodeerrors).split('\n')
-            stderr.pop()
+            if stderr[-1] == '':
+                stderr.pop()
         return (stdout, stderr, sub.returncode)
 
     def interact(self, cmd=None):

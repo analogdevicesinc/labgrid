@@ -269,6 +269,98 @@ def test_sshmanager_invalid_host_raise():
     with pytest.raises(ExecutionError):
         con.connect()
 
+class FakeSSHProcess:
+    def __init__(self, returncode=0, stdout=b"", alive=False):
+        self.returncode = None if alive else returncode
+        self._stdout = stdout
+
+    def communicate(self, input=None, timeout=None):
+        return (self._stdout, b"")
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def poll(self):
+        return self.returncode
+
+    def kill(self):
+        self.returncode = -9
+
+class FakeSSHSubprocess:
+    PIPE = subprocess.PIPE
+    STDOUT = subprocess.STDOUT
+    DEVNULL = subprocess.DEVNULL
+    TimeoutExpired = subprocess.TimeoutExpired
+    CalledProcessError = subprocess.CalledProcessError
+    SubprocessError = subprocess.SubprocessError
+
+    def __init__(self):
+        self.master_returncode = 0
+        self.masters = 0
+        self.keepalives = []
+
+    def Popen(self, args, **kwargs):
+        if "-O" in args and "check" in args:
+            return FakeSSHProcess(returncode=1, stdout=b"No such file or directory")
+        if "-MN" in args:
+            self.masters += 1
+            if self.master_returncode == 0:
+                control = next(a for a in args if a.startswith("ControlPath=")).split("=", 1)[1]
+                open(control, "w").close()
+            return FakeSSHProcess(returncode=self.master_returncode)
+        if args[-1] == "cat":
+            self.keepalives.append(FakeSSHProcess(alive=True))
+            return self.keepalives[-1]
+        return FakeSSHProcess()
+
+    def check_call(self, args, **kwargs):
+        return 0
+
+@pytest.fixture
+def fake_ssh_subprocess(monkeypatch):
+    import labgrid.util.ssh as ssh_module
+
+    fake = FakeSSHSubprocess()
+    monkeypatch.setattr(ssh_module, "subprocess", fake)
+    return fake
+
+@pytest.fixture
+def fake_connection(fake_ssh_subprocess):
+    con = SSHConnection("fakehost")
+    atexit.unregister(con.cleanup)
+    yield con
+    con.cleanup()
+
+def test_sshconnection_master_failure_allows_retry(fake_connection, fake_ssh_subprocess):
+    fake_ssh_subprocess.master_returncode = 255
+    with pytest.raises(ExecutionError):
+        fake_connection.connect()
+    with pytest.raises(ExecutionError):
+        fake_connection.connect()
+
+    fake_ssh_subprocess.master_returncode = 0
+    fake_connection.connect()
+    assert fake_connection.isconnected()
+
+def test_sshconnection_reconnect_dead_keepalive(fake_connection, fake_ssh_subprocess):
+    fake_connection.connect()
+    fake_connection.add_port_forward("localhost", 22)
+    fake_ssh_subprocess.keepalives[0].returncode = 255
+    assert not fake_connection.isconnected()
+
+    fake_connection.connect()
+    assert fake_connection.isconnected()
+    assert fake_ssh_subprocess.masters == 2
+    assert not fake_connection._l_forwards
+
+def test_sshmanager_get_reconnects_dead_keepalive(fake_connection, fake_ssh_subprocess, monkeypatch):
+    monkeypatch.setitem(sshmanager._connections, "fakehost", fake_connection)
+    fake_connection.connect()
+    fake_ssh_subprocess.keepalives[0].returncode = 255
+
+    assert sshmanager.get("fakehost") is fake_connection
+    assert fake_connection.isconnected()
+
 def test_proxymanager_no_proxy(target):
     host = 'localhost'
     port = 5000

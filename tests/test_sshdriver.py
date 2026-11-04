@@ -1,5 +1,7 @@
 import pytest
 import socket
+import subprocess
+import tempfile
 
 from labgrid import Environment
 from labgrid.driver import SSHDriver, ExecutionError
@@ -66,6 +68,42 @@ def test_run_check_raise(target, ssh_driver_mocked, mocker):
     res = s.run("test")
     assert res == (['error'], [], 1)
     target.deactivate(s)
+
+def test_run_timeout(target, ssh_driver_mocked):
+    s = ssh_driver_mocked
+    target.activate(s)
+    sub = subprocess.Popen.return_value
+    sub.reset_mock()
+    sub.poll.return_value = None
+    sub.communicate.side_effect = subprocess.TimeoutExpired("ssh", 1)
+    with pytest.raises(ExecutionError):
+        s.run("sleep 60", timeout=1)
+    sub.kill.assert_called_once()
+    sub.wait.assert_called_once()
+    sub.communicate.side_effect = None
+    target.deactivate(s)
+
+def test_run_stderr_without_trailing_newline(target, ssh_driver_mocked):
+    s = ssh_driver_mocked
+    target.activate(s)
+    sub = subprocess.Popen.return_value
+    sub.poll.return_value = None
+    sub.returncode = 1
+    sub.communicate.return_value = (b"out\n", b"fatal")
+    assert s.run("test") == (["out"], ["fatal"], 1)
+    sub.communicate.return_value = (b"out\n", b"fatal\n")
+    assert s.run("test") == (["out"], ["fatal"], 1)
+    target.deactivate(s)
+
+def test_master_retry_cleans_up(target, ssh_driver_mocked, monkeypatch, tmp_path):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    s = ssh_driver_mocked
+    s.connection_timeout = 0.3
+    subprocess.Popen.return_value.wait.return_value = 255
+    with pytest.raises(Exception, match="Timeout while waiting for ssh connection"):
+        target.activate(s)
+    assert subprocess.Popen.call_count >= 2
+    assert list(tmp_path.glob("lg-ssh-*")) == []
 
 def test_default_tools(target):
     NetworkService(target, "service", "1.2.3.4", "root")
