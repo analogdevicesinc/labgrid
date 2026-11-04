@@ -238,7 +238,12 @@ class SSHDriver(CommandMixin, Driver, CommandProtocol, FileTransferProtocol):
                 f"error executing command: {complete_cmd}"
             )
 
-        stdout, stderr = sub.communicate(timeout=timeout)
+        try:
+            stdout, stderr = sub.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as e:
+            sub.kill()
+            sub.wait()
+            raise ExecutionError(f"timeout of {timeout}s exceeded while executing {cmd}") from e
         stdout = stdout.decode(codec, decodeerrors).split('\n')
         if stdout[-1] == '':
             stdout.pop()
