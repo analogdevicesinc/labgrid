@@ -1,6 +1,7 @@
 import pytest
 import socket
 import subprocess
+import tempfile
 
 from labgrid import Environment
 from labgrid.driver import SSHDriver, ExecutionError
@@ -93,6 +94,16 @@ def test_run_stderr_without_trailing_newline(target, ssh_driver_mocked):
     sub.communicate.return_value = (b"out\n", b"fatal\n")
     assert s.run("test") == (["out"], ["fatal"], 1)
     target.deactivate(s)
+
+def test_master_retry_cleans_up(target, ssh_driver_mocked, monkeypatch, tmp_path):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    s = ssh_driver_mocked
+    s.connection_timeout = 0.3
+    subprocess.Popen.return_value.wait.return_value = 255
+    with pytest.raises(Exception, match="Timeout while waiting for ssh connection"):
+        target.activate(s)
+    assert subprocess.Popen.call_count >= 2
+    assert list(tmp_path.glob("lg-ssh-*")) == []
 
 def test_default_tools(target):
     NetworkService(target, "service", "1.2.3.4", "root")

@@ -109,6 +109,7 @@ class SSHDriver(CommandMixin, Driver, CommandProtocol, FileTransferProtocol):
             try:
                 return self._start_own_master_once(connect_timeout)
             except ExecutionError as e:
+                shutil.rmtree(self.tmpdir, ignore_errors=True)
                 if timeout.expired:
                     raise Exception("Timeout while waiting for ssh connection") from e
                 time.sleep(0.5)
