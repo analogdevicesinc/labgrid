@@ -1,3 +1,4 @@
+import argparse
 import pytest
 from shutil import which
 import socket
@@ -7,6 +8,7 @@ from labgrid.driver.exception import ExecutionError
 from labgrid.resource.remote import NetworkUSBDebugger
 from labgrid.resource.udev import USBDebugger
 from labgrid.driver.openocddriver import OpenOCDDriver
+from labgrid.remote.client import ClientSession, UserError
 from labgrid.util.helper import get_free_port
 
 
@@ -159,3 +161,45 @@ def test_openocd_debug_server_remote(target, agent, mocker):
 
     ssh.remove_port_forward.assert_called_once_with("localhost", 4000)
     wrapper.return_value.close.assert_called_once()
+
+
+@pytest.fixture
+def client_session(target, mocker):
+    """A labgrid-client session for a place which provides the target."""
+    session = object.__new__(ClientSession)
+    session.args = argparse.Namespace(name=None, gdb=None, telnet=None, tcl=None)
+    session.get_acquired_place = lambda: argparse.Namespace(name="test")
+    session._get_target = lambda place: target
+    # CTRL+C as soon as the command waits
+    mocker.patch("labgrid.remote.client.time", **{"sleep.side_effect": KeyboardInterrupt})
+    return session
+
+
+def test_openocd_client_debug(client_session, debug_driver, agent, capsys):
+    client_session.debug()
+
+    out = capsys.readouterr().out
+    assert "gdb server listening on localhost:4000\ngdb server listening on localhost:4001\n" in out
+    assert agent.start.call_args.args[1] == ["gdb"]
+    agent.stop.assert_called_once()
+
+
+def test_openocd_client_debug_services(client_session, debug_driver, capsys):
+    client_session.args.telnet = get_free_port()
+    client_session.args.tcl = 0
+
+    client_session.debug()
+
+    out = capsys.readouterr().out
+    assert f"telnet server listening on localhost:{client_session.args.telnet}\n" in out
+    assert "tcl server listening on localhost:" in out
+    assert "gdb server" not in out
+
+
+def test_openocd_client_debug_server_exits(client_session, debug_driver, agent):
+    agent.get_status.return_value = False
+
+    with pytest.raises(UserError, match="debug server exited"):
+        client_session.debug()
+
+    agent.stop.assert_called_once()
