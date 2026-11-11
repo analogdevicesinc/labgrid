@@ -11,6 +11,7 @@ import subprocess
 import traceback
 import logging
 import signal
+import time
 import sys
 import shlex
 import shutil
@@ -1294,6 +1295,37 @@ class ClientSession:
         target.activate(drv)
         drv.load(self.args.filename)
 
+    def debug(self):
+        place = self.get_acquired_place()
+        target = self._get_target(place)
+
+        services = {}
+        for service in ("gdb", "telnet", "tcl"):
+            port = getattr(self.args, service)
+            if port is not None:
+                services[service] = port or None
+
+        drv = target.get_driver("DebugProtocol", name=self.args.name)
+        try:
+            ports = drv.start(services or None)
+        except ExecutionError as e:
+            raise UserError(e.msg) from e
+        except ValueError as e:
+            raise UserError(str(e)) from e
+
+        try:
+            for service, service_ports in ports.items():
+                for port in service_ports:
+                    print(f"{service} server listening on localhost:{port}")
+            print("Waiting for CTRL+C...", flush=True)
+            while drv.get_status():
+                time.sleep(1)
+            raise UserError("debug server exited")
+        except KeyboardInterrupt:
+            print("Exiting...")
+        finally:
+            drv.stop()
+
     def sd_mux(self):
         place = self.get_acquired_place()
         action = self.args.action
@@ -2203,6 +2235,35 @@ def get_parser(auto_doc_mode=False) -> "argparse.ArgumentParser | AutoProgramArg
     subparser.add_argument("bootstrap_args", metavar="ARG", nargs=argparse.REMAINDER, help="extra bootstrap arguments")
     subparser.add_argument("--name", "-n", help="optional resource name")
     subparser.set_defaults(func=ClientSession.bootstrap)
+
+    subparser = subparsers.add_parser(
+        "debug",
+        help="start a debug server for the target",
+        description="Start a debug server for the target and forward its services to local ports. "
+        "Without a service option, the GDB server is started. "
+        "The environment config must have a driver for it, for example an OpenOCDDriver.",
+    )
+    subparser.add_argument(
+        "--gdb",
+        metavar="PORT",
+        type=int,
+        nargs="?",
+        const=0,
+        help="start the GDB server, the following ports are used for further cores (default port: a free port)",
+    )
+    subparser.add_argument(
+        "--telnet",
+        metavar="PORT",
+        type=int,
+        nargs="?",
+        const=0,
+        help="start the telnet server (default port: a free port)",
+    )
+    subparser.add_argument(
+        "--tcl", metavar="PORT", type=int, nargs="?", const=0, help="start the TCL server (default port: a free port)"
+    )
+    subparser.add_argument("--name", "-n", help="optional driver name")
+    subparser.set_defaults(func=ClientSession.debug)
 
     subparser = subparsers.add_parser("sd-mux", help="switch USB SD Muxer or get current mode")
     subparser.add_argument("action", choices=["dut", "host", "off", "client", "get"])
