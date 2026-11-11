@@ -301,6 +301,38 @@ usage: labgrid\-client create
 .EE
 .UNINDENT
 .UNINDENT
+.SS labgrid\-client debug
+.sp
+Start a debug server for the target and forward its services to local ports. Without a service option, the GDB server is started. The environment config must have a driver for it, for example an OpenOCDDriver.
+.INDENT 0.0
+.INDENT 3.5
+.sp
+.EX
+usage: labgrid\-client debug [\-\-gdb [PORT]] [\-\-telnet [PORT]] [\-\-tcl [PORT]]
+                            [\-\-name NAME]
+.EE
+.UNINDENT
+.UNINDENT
+.INDENT 0.0
+.TP
+.B \-\-gdb <port>
+start the GDB server, the following ports are used for further cores (default port: a free port)
+.UNINDENT
+.INDENT 0.0
+.TP
+.B \-\-telnet <port>
+start the telnet server (default port: a free port)
+.UNINDENT
+.INDENT 0.0
+.TP
+.B \-\-tcl <port>
+start the TCL server (default port: a free port)
+.UNINDENT
+.INDENT 0.0
+.TP
+.B \-\-name <name>, \-n <name>
+optional driver name
+.UNINDENT
 .SS labgrid\-client del\-alias
 .sp
 delete an alias from a place

@@ -2424,13 +2424,38 @@ Arguments:
 OpenOCDDriver
 ~~~~~~~~~~~~~
 An :any:`OpenOCDDriver` controls *OpenOCD* to bootstrap a target with a
-bootloader.
+bootloader or to debug it.
 
-The driver disables OpenOCD's GDB, telnet and TCL server ports. It does not
-provide a lifecycle to expose or stop these server interfaces, and disabling
-them allows multiple bootstrap operations to run concurrently on one exporter.
-Configurations which require a server interface can re-enable it with an
-appropriate command before ``init``.
+The driver disables OpenOCD's GDB, telnet and TCL server ports.
+This allows multiple bootstrap operations to run concurrently on one exporter.
+
+For debugging, ``start()`` runs OpenOCD with the requested ``gdb``, ``telnet``
+and ``tcl`` servers until ``stop()`` is called or the driver is deactivated,
+and returns the local TCP ports to connect to.
+OpenOCD listens only on the loopback interface of the host of the debug
+adapter, ports on an exporter are forwarded through SSH.
+
+.. code-block:: python
+
+   openocd = target.get_driver("DebugProtocol")
+   ports = openocd.start({"gdb": None, "telnet": 4444})  # None: a free port
+   # {"gdb": [41233], "telnet": [4444]}, a GDB port for each OpenOCD target
+   subprocess.run(["gdb", "--batch", "-ex", f"target extended-remote localhost:{ports['gdb'][0]}", ...])
+   openocd.stop()
+
+- While the debug server runs, the debug adapter is busy and ``load()`` and
+  ``execute()`` cannot be used.
+  A second OpenOCD for the same debug adapter, from another driver or process,
+  fails to start.
+- The debug server keeps running across tests until it is stopped.
+- GDB halts the target when it connects.
+  The target stays halted after ``stop()`` unless it is resumed first, for
+  example with GDB's ``monitor resume``.
+- The output of OpenOCD is logged, see it with ``labgrid-client -v``.
+  If OpenOCD does not start, it is part of the ``ExecutionError``.
+- Prefer free ports.
+  After the labgrid process was killed or terminated, a given local port can
+  stay in use for some minutes.
 
 Note that OpenOCD supports specifying USB paths since
 `a1b308ab <https://sourceforge.net/p/openocd/code/ci/a1b308ab/>`_ which was released with v0.11.
@@ -2449,6 +2474,7 @@ Binds to:
 
 Implements:
   - :any:`BootstrapProtocol`
+  - :any:`DebugProtocol`
 
 .. code-block:: yaml
 
@@ -2462,6 +2488,14 @@ Implements:
      - 'svf -quiet {filename}'
      - 'exit'
 
+.. code-block:: yaml
+
+   OpenOCDDriver:
+     board_config: 'stm32f746g-disco.cfg'
+     debug_commands:
+     - 'init'
+     - 'reset halt'
+
 Arguments:
   - config (str/list): optional, OpenOCD configuration file(s)
   - search (str): optional, include search path for scripts
@@ -2469,6 +2503,9 @@ Arguments:
   - interface_config (str): optional, interface config in the ``openocd/scripts/interface/`` directory
   - board_config (str): optional, board config in the ``openocd/scripts/board/`` directory
   - load_commands (list of str): optional, load commands to use instead of ``init``, ``bootstrap {filename}``, ``shutdown``
+  - debug_commands (list of str): optional, commands to start the debug server with instead of ``init``,
+    ``init`` is run after them if they do not include it, they must not ``shutdown``
+  - debug_timeout (int, default=30): optional, time in seconds to wait for the debug server to start
 
 OpenFPGALoaderDriver
 ~~~~~~~~~~~~~~~~~~~~
