@@ -44,10 +44,45 @@ def subprocess_mock(mocker):
                 return original([lg_py3_env], **kwargs)
 
     mocker.patch('subprocess.Popen', run)
+    mocker.patch.object(
+        labgrid.util.agentwrapper.sshmanager, 'get',
+        lambda host: FakeSSHConnection(host),
+    )
+
+
+class FakeSSHConnection:
+    """Stand-in for a connection from sshmanager, without a real SSH master."""
+
+    def __init__(self, host):
+        self.host = host
+
+    def get_prefix(self):
+        return ['ssh', '-x', '-o', 'ControlPath=/tmp/lg control', self.host]
 
 def test_create(subprocess_mock):
     aw = AgentWrapper('localhost')
     aw.close()
+
+def test_uses_sshmanager_connection(subprocess_mock, mocker):
+    """The agent is copied and started through the shared SSH connection."""
+    calls = []
+    run = subprocess.Popen
+
+    def record(args, **kwargs):
+        calls.append(args)
+        return run(args, **kwargs)
+
+    mocker.patch('subprocess.Popen', record)
+
+    aw = AgentWrapper('localhost')
+    aw.close()
+
+    prefix = FakeSSHConnection('localhost').get_prefix()
+    rsync, *ssh = calls
+    assert rsync[:3] == ['rsync', '-e', "ssh -x -o 'ControlPath=/tmp/lg control'"]
+    assert rsync[-1].startswith('localhost:.labgrid_agent')
+    assert ssh
+    assert all(args[:len(prefix)] == prefix and args[len(prefix)] == '--' for args in ssh)
 
 def test_call(subprocess_mock):
     aw = AgentWrapper('localhost')
