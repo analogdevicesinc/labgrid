@@ -2,13 +2,14 @@ import base64
 import hashlib
 import json
 import os.path
+import shlex
 import socket
 import subprocess
 import sys
 import traceback
 import logging
 
-from .ssh import get_ssh_connect_timeout
+from .ssh import sshmanager
 
 def b2s(b):
     return base64.b85encode(b).decode('ascii')
@@ -55,20 +56,20 @@ class AgentWrapper:
                 agent_data = agent_fd.read()
             agent_hash = hashlib.sha256(agent_data).hexdigest()
             agent_remote = os.path.join(agent_prefix, f'.labgrid_agent_{agent_hash}.py')
-            connect_timeout = get_ssh_connect_timeout()
-            ssh_opts = f'ssh -x -o ConnectTimeout={connect_timeout} -o PasswordAuthentication=no'.split()
+            ssh_prefix = sshmanager.get(host).get_prefix()
+            ssh_opts = ssh_prefix[:-1]
             subprocess.check_call(
-                ['rsync', '-e', ' '.join(ssh_opts), '-tq', agent,
+                ['rsync', '-e', shlex.join(ssh_opts), '-tq', agent,
                  f'{host}:{agent_remote}'],
             )
-            agent_python = "labgrid-python3" if not subprocess.call(ssh_opts + [host, '--', 'which', 'labgrid-python3']) else "python3"
+            agent_python = "labgrid-python3" if not subprocess.call(ssh_prefix + ['--', 'which', 'labgrid-python3']) else "python3"
             if agent_python == "python3":
                 self.logger.debug(
                     "labgrid-python3 on %s not found, using python3 which requires system installed python modules for agents",
                     host
                 )
             self.agent = subprocess.Popen(
-                ssh_opts + [host, '--', agent_python, agent_remote],
+                ssh_prefix + ['--', agent_python, agent_remote],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 start_new_session=True,
