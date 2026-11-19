@@ -459,6 +459,25 @@ _labgrid_client_flashscript()
     esac
 }
 
+_labgrid_client_debug()
+{
+    local cur prev words cword
+    _init_completion || return
+
+    case "$prev" in
+    -n|--name)
+        _labgrid_complete match-names "$cur"
+        return
+        ;;
+    esac
+
+    case "$cur" in
+    -*)
+        COMPREPLY=( $(compgen -W "--gdb --telnet --tcl --name $_labgrid_shared_options" -- "$cur") )
+        ;;
+    esac
+}
+
 _labgrid_client_bootstrap()
 {
     local cur prev words cword
@@ -911,6 +930,7 @@ _labgrid_client()
                                fastboot \
                                flashscript \
                                bootstrap \
+                               debug \
                                sd-mux \
                                usb-mux \
                                ssh \
