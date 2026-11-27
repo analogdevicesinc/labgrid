@@ -1,0 +1,51 @@
+board-a:
+  USBSerialPort:
+    match:
+      ID_SERIAL_SHORT: 'A50285BI'
+  reset:
+    cls: M2KDigitalIO
+    match:
+      ID_SERIAL_SHORT: '104473aa00bb00cc'
+    channel: 0            # DIO0 -> board A nRESET
+    direction: out
+  boot_mode:
+    cls: M2KDigitalIO
+    match:
+      ID_SERIAL_SHORT: '104473aa00bb00cc'
+    channel: 1            # DIO1 -> board A BOOT0
+    direction: out
+  vcc:
+    cls: M2KPowerSupply
+    match:
+      ID_SERIAL_SHORT: '104473aa00bb00cc'
+    channel: 0            # V+ -> board A 3V3 rail
+    voltage: 3.3
+  vbat_sense:
+    cls: M2KAnalogIn
+    match:
+      ID_SERIAL_SHORT: '104473aa00bb00cc'
+    channel: 0            # 1+/1- across board A VBAT
+    range: high
+
+board-b:
+  USBSerialPort:
+    match:
+      ID_SERIAL_SHORT: 'B71190CD'
+  reset:
+    cls: M2KDigitalIO
+    match:
+      ID_SERIAL_SHORT: '104473aa00bb00cc'
+    channel: 2            # DIO2 -> board B nRESET
+    direction: out
+  pgood:
+    cls: M2KDigitalIO
+    match:
+      ID_SERIAL_SHORT: '104473aa00bb00cc'
+    channel: 8            # DIO8 <- board B PGOOD
+    direction: in
+  vneg:
+    cls: M2KPowerSupply
+    match:
+      ID_SERIAL_SHORT: '104473aa00bb00cc'
+    channel: 1            # V- -> board B negative rail
+    voltage: -5.0

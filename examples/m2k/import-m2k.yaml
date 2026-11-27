@@ -1,0 +1,20 @@
+targets:
+  main:
+    resources:
+      RemotePlace:
+        name: board-a
+    drivers:
+      M2KDigitalIODriver:
+        name: reset
+        bindings:
+          gpio: reset
+      M2KPowerSupplyDriver:
+        name: vcc
+        bindings:
+          supply: vcc
+      M2KAnalogInDriver:
+        name: vbat_sense
+        bindings:
+          analog: vbat_sense
+options:
+  coordinator_address: 'labgrid:20408'
