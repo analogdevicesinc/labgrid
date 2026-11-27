@@ -41,23 +41,36 @@ class GpioDigitalOutput:
 
         self.gpio_sysfs_direction_path = os.path.join(gpio_sysfs_path, 'direction')
         self.gpio_sysfs_active_low_path = os.path.join(gpio_sysfs_path, 'active_low')
+        self.gpio_sysfs_value_path = os.path.join(gpio_sysfs_path, 'value')
         self.configure(index, invert, direction)
 
-        gpio_sysfs_value_path = os.path.join(gpio_sysfs_path, 'value')
         flags = os.O_SYNC
         if direction == 'out':
             flags |= os.O_RDWR
         else:
             flags |= os.O_RDONLY
-        self.gpio_sysfs_value_fd = os.open(gpio_sysfs_value_path, flags=flags)
+        self.gpio_sysfs_value_fd = os.open(self.gpio_sysfs_value_path, flags=flags)
+
+    def _is_physically_high(self):
+        # value honours active_low, while "high" written to direction does not.
+        with open(self.gpio_sysfs_value_path, 'rb') as value_fd:
+            value = value_fd.read(1) == b'1'
+        with open(self.gpio_sysfs_active_low_path, 'rb') as active_low_fd:
+            active_low = active_low_fd.read(1) == b'1'
+        return value != active_low
 
     def configure(self, index, invert, direction):
         with open(self.gpio_sysfs_direction_path, 'rb') as direction_fd:
             literal_value = direction_fd.read(3).strip()
         if literal_value != self._directions[direction]:
             self._logger.debug("Configuring GPIO %d as %s.", index, direction)
+            new_direction = self._directions[direction]
+            # Writing "out" drives the line low. Some drivers, such as hid-mcp2221,
+            # report "in" for a line that is driven high, so keep its level.
+            if direction == 'out' and self._is_physically_high():
+                new_direction = b'high'
             with open(self.gpio_sysfs_direction_path, 'wb') as direction_fd:
-                direction_fd.write(self._directions[direction])
+                direction_fd.write(new_direction)
 
         with open(self.gpio_sysfs_active_low_path, 'w') as active_low_fd:
             active_low_fd.write(str(int(invert)))

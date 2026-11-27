@@ -81,6 +81,25 @@ class TestGpioAgent:
             sysfsgpio.handle_get(13, False, 'in')
             sysfsgpio.handle_set(13, False, False)
 
+            # The line was high, so it is switched back with "high" to keep its level.
+            # Real sysfs reads back "out" for both.
             direction_file_path = os.path.join(gpio_line_directory, 'direction')
             with open(direction_file_path, mode='rb') as direction_file:
-                assert direction_file.read() == b'out'
+                assert direction_file.read() == b'high'
+
+    @pytest.mark.parametrize('active_low, value', [(b'0', b'1'), (b'1', b'0')])
+    def test_output_keeps_high_level(self, active_low, value):
+        with TemporaryDirectory() as sysfs_mock_directory:
+            GpioDigitalOutput._gpio_sysfs_path_prefix = sysfs_mock_directory
+            gpio_line_directory = os.path.join(sysfs_mock_directory, 'gpio13')
+            os.mkdir(gpio_line_directory)
+            control_files = {'active_low': active_low, 'direction': b'in', 'value': value}
+            for control_file, content in control_files.items():
+                with open(os.path.join(gpio_line_directory, control_file), mode='wb') as f:
+                    f.write(content)
+
+            GpioDigitalOutput(index=13, invert=active_low == b'1')
+
+            direction_file_path = os.path.join(gpio_line_directory, 'direction')
+            with open(direction_file_path, mode='rb') as direction_file:
+                assert direction_file.read() == b'high'
